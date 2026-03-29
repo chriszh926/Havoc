@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Havoc — FPS</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="hud">
+      <div id="practice-react-flash" class="practice-react-flash hidden" aria-hidden="true"></div>
+      <div
+        id="practice-react-prompt"
+        class="practice-react-prompt hidden"
+        aria-live="assertive"
+        aria-hidden="true"
+      >
+        CLICK RIGHT NOW
+      </div>
+      <div id="practice-react-done" class="practice-react-done hidden" aria-hidden="true">
+        <div class="practice-react-done-icon">
+          <svg viewBox="0 0 64 64" width="88" height="88" focusable="false" aria-hidden="true">
+            <circle cx="32" cy="32" r="28" fill="none" stroke="#4ade80" stroke-width="5" opacity="0.95" />
+            <path
+              d="M18 34 L28 44 L46 22"
+              fill="none"
+              stroke="#ecfdf5"
+              stroke-width="5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </div>
+      </div>
+      <div id="crosshair">
+        <div class="ch-plus">
+          <div class="ch-bar ch-bar-h ch-top"></div>
+          <div class="ch-mid">
+            <div class="ch-bar ch-bar-v ch-left"></div>
+            <div class="ch-center">
+              <div class="ch-dot" aria-hidden="true"></div>
+            </div>
+            <div class="ch-bar ch-bar-v ch-right"></div>
+          </div>
+          <div class="ch-bar ch-bar-h ch-bottom"></div>
+        </div>
+        <div class="ch-ads-only" aria-hidden="true">
+          <div class="ads-ring"></div>
+        </div>
+      </div>
+      <div id="damage-floaters" aria-hidden="true"></div>
+      <div id="damage-vignette" class="damage-vignette" aria-hidden="true"></div>
+      <div id="sniper-scope" class="sniper-scope hidden" aria-hidden="true">
+        <div class="sniper-scope-lens">
+          <div class="sniper-scope-cross sniper-scope-cross-h"></div>
+          <div class="sniper-scope-cross sniper-scope-cross-v"></div>
+          <div class="sniper-scope-ring"></div>
+          <div class="sniper-scope-dot"></div>
+        </div>
+      </div>
+      <div id="streak-toast" class="streak-toast hidden" aria-live="polite" aria-hidden="true"></div>
+      <div id="hitmarker" class="hidden" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="34" height="34" focusable="false">
+          <path
+            d="M7 7 L12 12 M20 20 L25 25 M25 7 L20 12 M12 20 L7 25"
+            fill="none"
+            stroke="#f8f8f8"
+            stroke-width="2.4"
+            stroke-linecap="square"
+          />
+        </svg>
+      </div>
+      <div id="weapon-bar" class="weapon-bar hidden" aria-hidden="true">
+        <div class="weapon-slot active" data-slot="0" title="Primary (1)">
+          <span class="weapon-slot-key">1</span>
+          <svg class="weapon-icon" viewBox="0 0 64 24" width="56" height="22" aria-hidden="true">
+            <rect x="4" y="10" width="48" height="6" rx="1" fill="currentColor" opacity="0.92" />
+            <rect x="44" y="7" width="16" height="5" rx="0.5" fill="currentColor" opacity="0.75" />
+            <rect x="2" y="8" width="10" height="10" rx="1" fill="currentColor" opacity="0.55" />
+          </svg>
+          <span class="weapon-slot-name">Primary</span>
+        </div>
+        <div class="weapon-slot" data-slot="1" title="Secondary (2)">
+          <span class="weapon-slot-key">2</span>
+          <svg class="weapon-icon weapon-icon-pistol" viewBox="0 0 52 34" width="40" height="28" aria-hidden="true">
+            <path
+              d="M10 16 L34 16 L38 14 L42 14 L44 17 L44 19 L40 20 L36 20 L34 22 L14 22 L12 20 L10 18 Z"
+              fill="currentColor"
+              opacity="0.88"
+            />
+            <path
+              d="M12 22 L32 22 L30 30 L26 32 L14 32 L10 28 L11 24 Z"
+              fill="currentColor"
+              opacity="0.62"
+            />
+            <rect x="36" y="15" width="7" height="4" rx="0.5" fill="currentColor" opacity="0.45" />
+            <line x1="14" y1="17" x2="30" y2="17" stroke="currentColor" stroke-width="0.8" opacity="0.35" />
+          </svg>
+          <span class="weapon-slot-name">Secondary</span>
+        </div>
+        <div class="weapon-slot" data-slot="2" title="Melee (3)">
+          <span class="weapon-slot-key">3</span>
+          <svg class="weapon-icon" viewBox="0 0 40 40" width="30" height="30" aria-hidden="true">
+            <path
+              d="M8 28 L20 16 L26 10 L30 14 L22 22 L12 32 Z"
+              fill="currentColor"
+              opacity="0.85"
+            />
+            <rect x="4" y="28" width="10" height="8" rx="1" fill="currentColor" opacity="0.55" />
+          </svg>
+          <span class="weapon-slot-name">Melee</span>
+        </div>
+        <div class="weapon-slot" data-slot="3" title="Utility (4)">
+          <span class="weapon-slot-key">4</span>
+          <svg class="weapon-icon" viewBox="0 0 40 40" width="34" height="34" aria-hidden="true">
+            <rect x="10" y="10" width="20" height="20" rx="3" fill="currentColor" opacity="0.5" />
+            <path d="M20 14 L26 20 L20 26 L14 20 Z" fill="currentColor" opacity="0.9" />
+          </svg>
+          <span class="weapon-slot-name">Utility</span>
+        </div>
+      </div>
+      <div id="stats">
+        <span id="score">Score: 0</span>
+        <span id="health">Health: 150</span>
+        <span id="ammo">Rifle: 20 / 200</span>
+      </div>
+      <p id="practice-hint" class="practice-hint hidden" aria-live="polite"></p>
+      <div id="health-bar-wrap" aria-hidden="true">
+        <div id="health-bar-fill"></div>
+      </div>
+      <div id="overlay">
+        <div class="menu-backdrop" aria-hidden="true"></div>
+        <div class="menu-card">
+          <div class="menu-shell">
+            <header class="menu-topbar">
+              <div class="menu-topbar-text">
+                <p class="menu-kicker">Arena FPS</p>
+                <h1 class="menu-title">Havoc</h1>
+              </div>
+              <button type="button" id="start" class="menu-start-btn menu-start-btn--hero">Deploy</button>
+            </header>
+
+            <section class="menu-block" aria-labelledby="menu-brief-h">
+              <div class="menu-block-head">
+                <span class="menu-block-idx" aria-hidden="true">01</span>
+                <h2 class="menu-block-title" id="menu-brief-h">Briefing</h2>
+              </div>
+              <p class="menu-objective" id="menu-objective">
+                Eliminate glowing red enemies before they reach you.
+              </p>
+            </section>
+
+            <section class="menu-block" aria-labelledby="menu-train-h">
+              <div class="menu-block-head">
+                <span class="menu-block-idx" aria-hidden="true">02</span>
+                <h2 class="menu-block-title" id="menu-train-h">Training</h2>
+              </div>
+              <p class="menu-block-note">Optional. Pick one lane at a time — survival waves turn off.</p>
+              <div class="menu-pick-grid">
+                <label class="menu-pick" for="practice-mode">
+                  <input type="checkbox" id="practice-mode" />
+                  <span class="menu-pick-body">
+                    <span class="menu-pick-name">Moving targets</span>
+                    <span class="menu-pick-detail">Spheres in the arena · blue bonus · infinite AR</span>
+                  </span>
+                </label>
+                <label class="menu-pick" for="practice-mode-2">
+                  <input type="checkbox" id="practice-mode-2" />
+                  <span class="menu-pick-body">
+                    <span class="menu-pick-name">Obby &amp; reactions</span>
+                    <span class="menu-pick-detail">Void course · no guns · flashes 1–15s · click within 1s</span>
+                  </span>
+                </label>
+              </div>
+            </section>
+
+            <section class="menu-block menu-block--last" aria-labelledby="menu-kit-h">
+              <div class="menu-block-head">
+                <span class="menu-block-idx" aria-hidden="true">03</span>
+                <h2 class="menu-block-title" id="menu-kit-h">Arena &amp; kit</h2>
+              </div>
+              <p class="menu-block-note">Opens a panel. Changes apply on Deploy or when you resume.</p>
+              <div class="menu-seg-group" role="group" aria-label="Setup panels">
+                <button type="button" class="menu-seg" id="menu-open-map" aria-haspopup="dialog">Map</button>
+                <button type="button" class="menu-seg" id="menu-open-loadout" aria-haspopup="dialog">
+                  Loadout
+                </button>
+                <button type="button" class="menu-seg" id="menu-open-controls" aria-haspopup="dialog">
+                  Controls
+                </button>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div id="menu-modal-controls" class="menu-modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-controls-h">
+          <button type="button" class="menu-modal-scrim" data-close-menu-modal aria-label="Close"></button>
+          <div class="menu-modal-sheet">
+            <div class="menu-modal-head">
+              <p class="menu-modal-tag">Input</p>
+              <h2 id="modal-controls-h" class="menu-modal-title">Controls</h2>
+            </div>
+            <ul class="menu-controls-list menu-controls-list--modal">
+              <li><kbd>WASD</kbd> move · <kbd>Space</kbd> jump (hold to jump again on landing) · <kbd>C</kbd> crouch</li>
+              <li><kbd>E</kbd> aim down sights · <kbd>R</kbd> reload</li>
+              <li><kbd>1</kbd>–<kbd>4</kbd> primary / secondary / melee / utility</li>
+              <li><kbd>Q</kbd> dash · <kbd>V</kbd> third-person camera · <kbd>M</kbd> menu / pause</li>
+              <li><kbd>Left click</kbd> fire · <kbd>F</kbd> fire when using drag-to-look</li>
+            </ul>
+            <button type="button" class="menu-modal-close" data-close-menu-modal>Close</button>
+          </div>
+        </div>
+
+        <div id="menu-modal-loadout" class="menu-modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-loadout-h">
+          <button type="button" class="menu-modal-scrim" data-close-menu-modal aria-label="Close"></button>
+          <div class="menu-modal-sheet">
+            <div class="menu-modal-head">
+              <p class="menu-modal-tag">Slots 1–4</p>
+              <h2 id="modal-loadout-h" class="menu-modal-title">Loadout</h2>
+            </div>
+            <p class="menu-modal-lead">
+              Primary, secondary, melee, then utility. Slot <strong>4</strong>:
+              <strong>Resupply</strong>, <strong>Medkit</strong>, or <strong>Grenade</strong>.
+            </p>
+            <div class="loadout-panel loadout-panel--modal" id="loadout-panel">
+              <div class="loadout-grid">
+                <div class="loadout-row">
+                  <label for="loadout-primary">Primary</label>
+                  <select id="loadout-primary" aria-label="Primary weapon">
+                    <option value="0">Assault Rifle</option>
+                    <option value="1">Battle Rifle</option>
+                    <option value="2">SMG</option>
+                    <option value="3">Shotgun</option>
+                    <option value="4">Sniper</option>
+                  </select>
+                </div>
+                <div class="loadout-row">
+                  <label for="loadout-secondary">Secondary</label>
+                  <select id="loadout-secondary" aria-label="Secondary weapon">
+                    <option value="0">Handgun</option>
+                    <option value="1">Heavy Pistol</option>
+                    <option value="2">Revolver</option>
+                  </select>
+                </div>
+                <div class="loadout-row">
+                  <label for="loadout-melee">Melee</label>
+                  <select id="loadout-melee" aria-label="Melee weapon">
+                    <option value="0">Knife</option>
+                    <option value="1">Tactical Axe</option>
+                    <option value="2">Brass Knuckles</option>
+                  </select>
+                </div>
+                <div class="loadout-row">
+                  <label for="loadout-utility">Utility</label>
+                  <select id="loadout-utility" aria-label="Utility item">
+                    <option value="0">Resupply</option>
+                    <option value="1">Medkit</option>
+                    <option value="2">Grenade</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <button type="button" class="menu-modal-close" data-close-menu-modal>Close</button>
+          </div>
+        </div>
+
+        <div id="menu-modal-map" class="menu-modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-map-h">
+          <button type="button" class="menu-modal-scrim" data-close-menu-modal aria-label="Close"></button>
+          <div class="menu-modal-sheet">
+            <div class="menu-modal-head">
+              <p class="menu-modal-tag">Rotation</p>
+              <h2 id="modal-map-h" class="menu-modal-title">Map</h2>
+            </div>
+            <p class="menu-modal-lead">
+              Takes effect on <strong>Start</strong>, or immediately if you change it before resuming a run.
+            </p>
+            <div class="map-row map-row--modal">
+              <label for="map-select">Arena</label>
+              <select id="map-select" aria-label="Map">
+                <option value="courtyard">Courtyard — open yard, crates &amp; barriers</option>
+                <option value="depot">Depot — central rails, tight lanes</option>
+                <option value="warehouse">Warehouse — dense crate maze</option>
+                <option value="crossing">Crossing — four-corner duel + center</option>
+                <option value="playground">Playground — trampolines + tight corridors</option>
+                <option value="forest">Forest — wolves &amp; rare bears (wildlife)</option>
+              </select>
+            </div>
+            <p id="map-blurb" class="map-blurb" aria-live="polite"></p>
+            <button type="button" class="menu-modal-close" data-close-menu-modal>Close</button>
+          </div>
+        </div>
+      </div>
+      <div id="gameover" class="hidden">
+        <div class="menu-backdrop" aria-hidden="true"></div>
+        <div class="menu-card menu-card--compact">
+          <div class="menu-end">
+            <p class="menu-kicker">Run ended</p>
+            <h2 class="gameover-title">Game over</h2>
+            <p id="final-score" class="final-score"></p>
+            <button type="button" id="restart" class="menu-start-btn menu-start-btn--wide">Play again</button>
+          </div>
+        </div>
+      </div>
+      <button type="button" id="menu-btn" class="hud-menu-btn" aria-label="Open menu (keyboard M)">Menu</button>
+    </div>
+    <canvas id="c"></canvas>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
