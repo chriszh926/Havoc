@@ -130,6 +130,37 @@
       </div>
       <div id="overlay">
         <div class="menu-backdrop" aria-hidden="true"></div>
+        <div
+          id="menu-modal-input-layout"
+          class="menu-modal menu-modal-input-layout hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="modal-input-layout-h"
+        >
+          <div class="menu-modal-sheet menu-modal-sheet--input-layout">
+            <div class="menu-modal-head">
+              <p class="menu-modal-tag">Welcome</p>
+              <h2 id="modal-input-layout-h" class="menu-modal-title">How are you playing?</h2>
+            </div>
+            <p class="menu-modal-lead">
+              Pick what matches your device — we will turn on touch controls (joystick, aim, fire) for
+              <strong>mobile / tablet</strong>, or mouse look and pointer lock for
+              <strong>computer</strong>.
+            </p>
+            <div class="input-layout-picks">
+              <button type="button" class="menu-start-btn menu-start-btn--wide" id="input-layout-mobile-btn">
+                Phone or tablet
+              </button>
+              <button
+                type="button"
+                class="menu-start-btn menu-start-btn--wide menu-start-btn--secondary"
+                id="input-layout-desktop-btn"
+              >
+                Computer
+              </button>
+            </div>
+          </div>
+        </div>
         <div class="menu-card">
           <div class="menu-shell">
             <header class="menu-topbar">
@@ -179,6 +210,11 @@
                 <span class="menu-block-idx" aria-hidden="true">03</span>
                 <h2 class="menu-block-title" id="menu-kit-h">Arena &amp; kit</h2>
               </div>
+              <p class="menu-block-note">
+                <button type="button" class="menu-input-layout-note" id="menu-open-input-layout">
+                  Device: choose before Deploy
+                </button>
+              </p>
               <p class="menu-block-note">Opens a panel. Changes apply on Deploy or when you resume.</p>
               <div class="menu-seg-group" role="group" aria-label="Setup panels">
                 <button type="button" class="menu-seg" id="menu-open-map" aria-haspopup="dialog">Map</button>
@@ -299,6 +335,16 @@
             <p id="final-score" class="final-score"></p>
             <button type="button" id="restart" class="menu-start-btn menu-start-btn--wide">Play again</button>
           </div>
+        </div>
+      </div>
+      <div id="mobile-controls" class="mobile-controls hidden" aria-hidden="true">
+        <div class="mobile-joystick" id="mobile-joystick" aria-label="Move stick">
+          <div class="mobile-joystick-base" aria-hidden="true"></div>
+          <div class="mobile-joystick-stick" id="mobile-joystick-stick" aria-hidden="true"></div>
+        </div>
+        <div class="mobile-combat-btns" id="mobile-combat-btns">
+          <button type="button" class="mobile-btn mobile-btn-aim" id="mobile-btn-aim" aria-label="Aim down sights">Aim</button>
+          <button type="button" class="mobile-btn mobile-btn-fire" id="mobile-btn-fire" aria-label="Fire weapon">Fire</button>
         </div>
       </div>
       <button type="button" id="menu-btn" class="hud-menu-btn" aria-label="Open menu (keyboard M)">Menu</button>

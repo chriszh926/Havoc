@@ -66,6 +66,8 @@ const PLAYER_HEIGHT = 1.65;
 const PLAYER_RADIUS = 0.35;
 const MOVE_SPEED = 9;
 const MOUSE_SENS = 0.0022;
+/** Multiply drag-look sensitivity for touch pointers (coarse / mobile). */
+const TOUCH_LOOK_SENS_MUL = 1.62;
 const PITCH_LIMIT = Math.PI / 2 - 0.08;
 const CAMERA_FOV_HIP = 72;
 const CAMERA_FOV_ADS = 50;
@@ -90,7 +92,7 @@ const PRIMARY_OPTIONS = [
     reloadTime: 3,
     fireCooldown: 0.075,
     moveMul: 1,
-    arDamageMul: 0.78,
+    arDamageMul: 1.56,
   },
   {
     label: "Battle Rifle",
@@ -412,6 +414,88 @@ let draggingView = false;
 let lastDragX = 0;
 let lastDragY = 0;
 let lockFallbackTimer = 0;
+
+const INPUT_LAYOUT_STORAGE_KEY = "havoc_input_layout";
+
+function readStoredInputLayout() {
+  try {
+    const v = localStorage.getItem(INPUT_LAYOUT_STORAGE_KEY);
+    if (v === "mobile") return true;
+    if (v === "desktop") return false;
+  } catch (_) {
+    /* ignore */
+  }
+  return null;
+}
+
+/** `null` until the player chooses in the menu. */
+let inputLayoutMobile = readStoredInputLayout();
+let inputLayoutModalOpen = false;
+
+function useMobileFriendlyUi() {
+  return inputLayoutMobile === true;
+}
+
+function updateInputLayoutModalVisibility() {
+  const modal = document.getElementById("menu-modal-input-layout");
+  if (!modal) return;
+  const show = inputLayoutModalOpen || inputLayoutMobile === null;
+  modal.classList.toggle("hidden", !show);
+}
+
+function syncStartButtonForLayout() {
+  if (startBtn) startBtn.disabled = inputLayoutMobile === null;
+}
+
+function syncInputLayoutMenuLabel() {
+  const el = document.getElementById("menu-open-input-layout");
+  if (!el) return;
+  if (inputLayoutMobile === null) {
+    el.textContent = "Device: tap to choose phone/tablet or computer (required)";
+  } else if (inputLayoutMobile) {
+    el.textContent = "Device: Mobile / tablet (tap to change)";
+  } else {
+    el.textContent = "Device: Computer (tap to change)";
+  }
+}
+
+function setInputLayoutMobile(isMobile) {
+  inputLayoutMobile = isMobile;
+  inputLayoutModalOpen = false;
+  try {
+    localStorage.setItem(
+      INPUT_LAYOUT_STORAGE_KEY,
+      isMobile ? "mobile" : "desktop"
+    );
+  } catch (_) {
+    /* ignore */
+  }
+  updateInputLayoutModalVisibility();
+  syncStartButtonForLayout();
+  syncInputLayoutMenuLabel();
+}
+
+function openInputLayoutChoiceModal() {
+  inputLayoutModalOpen = true;
+  updateInputLayoutModalVisibility();
+}
+
+/** Virtual stick −1..1; merged with WASD in movement tick. */
+let mobileFwd = 0;
+let mobileStrafe = 0;
+let mobileFireHeld = false;
+let mobileAdsHeld = false;
+let mobileJoyPointerId = null;
+
+function resetMobileInput() {
+  mobileFwd = 0;
+  mobileStrafe = 0;
+  mobileFireHeld = false;
+  mobileAdsHeld = false;
+  mobileJoyPointerId = null;
+  const stick = document.getElementById("mobile-joystick-stick");
+  if (stick) stick.style.transform = "translate(0, 0)";
+}
 let score = 0;
 /** Rapid kills within this window stack streak bonus + HUD toast. */
 const KILL_CHAIN_WINDOW_MS = 2600;
@@ -479,6 +563,7 @@ function syncPracticeSessionIfNeeded() {
       scene.remove(e.root);
     }
     enemies.length = 0;
+    clearAmmoPickups();
     refreshWeaponBarFromLoadout();
     syncLoadoutViewmodels();
     updateWeaponHud();
@@ -497,6 +582,7 @@ function syncPracticeSessionIfNeeded() {
     clearPracticeTargets();
     spawnTimer = 0;
     teardownPracticeReactChallenge();
+    clearAmmoPickups();
   }
 }
 
@@ -2911,12 +2997,17 @@ function updateMapBlurb() {
 }
 
 function closeMenuModals() {
-  document.querySelectorAll("#overlay .menu-modal").forEach((el) => el.classList.add("hidden"));
+  document.querySelectorAll("#overlay .menu-modal").forEach((el) => {
+    if (el.id === "menu-modal-input-layout") return;
+    el.classList.add("hidden");
+  });
 }
 
 function openMenuModal(elId) {
+  inputLayoutModalOpen = false;
   closeMenuModals();
   document.getElementById(elId)?.classList.remove("hidden");
+  updateInputLayoutModalVisibility();
 }
 
 overlay?.addEventListener("click", (e) => {
@@ -4481,6 +4572,8 @@ function spawnEnemy() {
   let meleeReach = 1.05;
   let canJump = true;
   let bobAmp = 0.04;
+  /** 1 = human, 2 = wolf, 3 = bear — scales ammo drop size. */
+  let ammoDropTier = 1;
 
   /** Forest: wolves & bears only. Every other map: human hostiles. */
   if (activeMapId === "forest") {
@@ -4494,6 +4587,7 @@ function spawnEnemy() {
       meleeReach = 2.88;
       canJump = false;
       bobAmp = 0.026;
+      ammoDropTier = 3;
     } else {
       built = buildWolf();
       hp = WOLF_HP;
@@ -4504,6 +4598,7 @@ function spawnEnemy() {
       meleeReach = 1.98;
       canJump = false;
       bobAmp = 0.058;
+      ammoDropTier = 2;
     }
   } else {
     built = buildEnemy();
@@ -4524,6 +4619,7 @@ function spawnEnemy() {
     meleeReach,
     canJump,
     bobAmp,
+    ammoDropTier,
     phase: Math.random() * Math.PI * 2,
     mats,
     matBases,
@@ -4795,6 +4891,114 @@ function resetAmmoToLoadout() {
   primaryReserveAmmo = PRIMARY_OPTIONS.map((w) => w.reserveMax);
   secondaryMagAmmo = SECONDARY_OPTIONS.map((w) => w.magSize);
   secondaryReserveAmmo = SECONDARY_OPTIONS.map((w) => w.reserveMax);
+}
+
+const AMMO_PICKUP_LIFETIME = 75;
+const AMMO_PICKUP_COLLECT_R = 1.38;
+const ammoPickups = [];
+
+function ammoPackAmountsForTier(tier) {
+  if (tier >= 3) return { addP: 42, addS: 32 };
+  if (tier >= 2) return { addP: 28, addS: 20 };
+  return { addP: 22, addS: 15 };
+}
+
+function clearAmmoPickups() {
+  for (const pk of ammoPickups) {
+    scene.remove(pk.mesh);
+    pk.mesh.geometry?.dispose?.();
+    pk.mesh.material?.dispose?.();
+  }
+  ammoPickups.length = 0;
+}
+
+function spawnAmmoPickupAt(pos, tier) {
+  if (practiceMode) return;
+  const { addP, addS } = ammoPackAmountsForTier(tier);
+  const geom = new THREE.BoxGeometry(0.24, 0.14, 0.32);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xc9a045,
+    emissive: 0x6a4a0a,
+    emissiveIntensity: 0.55,
+    metalness: 0.35,
+    roughness: 0.45,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.position.set(pos.x, pos.y + 0.12, pos.z);
+  mesh.rotation.y = Math.random() * Math.PI * 2;
+  mesh.castShadow = true;
+  scene.add(mesh);
+  ammoPickups.push({
+    mesh,
+    addP,
+    addS,
+    tRemain: AMMO_PICKUP_LIFETIME,
+    baseY: mesh.position.y,
+    phase: Math.random() * Math.PI * 2,
+  });
+}
+
+function dropAmmoFromEnemy(enemy, hitPoint) {
+  if (practiceMode || !enemy) return;
+  if (Math.random() >= 0.1) return;
+  const feet = enemy.root.position;
+  const x = hitPoint != null ? hitPoint.x : feet.x;
+  const z = hitPoint != null ? hitPoint.z : feet.z;
+  const y = Math.max(0.2, feet.y);
+  tmpV.set(x, y, z);
+  spawnAmmoPickupAt(tmpV, enemy.ammoDropTier ?? 1);
+}
+
+function updateAmmoPickups(dt) {
+  if (!playing || practiceMode || health <= 0) return;
+  const px = yaw.position.x;
+  const pz = yaw.position.z;
+  const py = yaw.position.y;
+  const now = performance.now();
+
+  for (let i = ammoPickups.length - 1; i >= 0; i--) {
+    const pk = ammoPickups[i];
+    pk.tRemain -= dt;
+    const bob = Math.sin(now * 0.0032 + pk.phase) * 0.05;
+    pk.mesh.position.y = pk.baseY + bob;
+    pk.mesh.rotation.y += dt * 1.4;
+
+    if (pk.tRemain <= 0) {
+      scene.remove(pk.mesh);
+      pk.mesh.geometry.dispose();
+      pk.mesh.material.dispose();
+      ammoPickups.splice(i, 1);
+      continue;
+    }
+
+    const dx = pk.mesh.position.x - px;
+    const dz = pk.mesh.position.z - pz;
+    const dy = pk.mesh.position.y - py;
+    if (
+      Math.hypot(dx, dz) < AMMO_PICKUP_COLLECT_R &&
+      Math.abs(dy) < 1.85
+    ) {
+      const pIdx = loadoutChoice[SLOT_PRIMARY];
+      const sIdx = loadoutChoice[SLOT_SECONDARY];
+      const pDef = getPrimaryDef();
+      const sDef = getSecondaryDef();
+      primaryReserveAmmo[pIdx] = Math.min(
+        pDef.reserveMax,
+        primaryReserveAmmo[pIdx] + pk.addP
+      );
+      secondaryReserveAmmo[sIdx] = Math.min(
+        sDef.reserveMax,
+        secondaryReserveAmmo[sIdx] + pk.addS
+      );
+      void resumeAudio();
+      playReloadGrab();
+      updateAmmoHud();
+      scene.remove(pk.mesh);
+      pk.mesh.geometry.dispose();
+      pk.mesh.material.dispose();
+      ammoPickups.splice(i, 1);
+    }
+  }
 }
 
 function showHitmarker() {
@@ -5096,6 +5300,7 @@ function explodeGrenadeAt(pos, dmg, radius) {
     applyEnemyKnockback(e, pos, 2.8 * mul);
     flashEnemy(e);
     if (e.hp <= 0) {
+      dropAmmoFromEnemy(e, hitPt);
       playKill();
       clearEnemyDamagePopup(e);
       scene.remove(e.root);
@@ -5230,6 +5435,7 @@ function tryMeleeAttack() {
     applyEnemyKnockback(e, tmpEyeWorld, 1.15);
     flashEnemy(e);
     if (e.hp <= 0) {
+      dropAmmoFromEnemy(e, rec.point);
       playKill();
       clearEnemyDamagePopup(e);
       burstDeathAt(rec.point);
@@ -5369,6 +5575,7 @@ function shootShotgunPellets(start) {
     applyEnemyKnockback(e, start, 1.95);
     flashEnemy(e);
     if (e.hp <= 0) {
+      dropAmmoFromEnemy(e, row.pt);
       playKill();
       clearEnemyDamagePopup(e);
       burstDeathAt(row.pt);
@@ -5526,6 +5733,7 @@ function shoot() {
       applyEnemyKnockback(e, start, 1.8);
       flashEnemy(e);
       if (e.hp <= 0) {
+        dropAmmoFromEnemy(e, h.point);
         playKill();
         clearEnemyDamagePopup(e);
         burstDeathAt(h.point);
@@ -5581,6 +5789,7 @@ function shoot() {
   applyEnemyKnockback(hitEnemy, start, activeWeapon === SLOT_SECONDARY ? 1.45 : 1.8);
   flashEnemy(hitEnemy);
   if (hitEnemy.hp <= 0) {
+    dropAmmoFromEnemy(hitEnemy, hitList[0]?.point);
     playKill();
     clearEnemyDamagePopup(hitEnemy);
     burstDeathAt(hitList[0]?.point ?? hitEnemy.root.position);
@@ -5692,6 +5901,7 @@ function pauseToMenu() {
 
   fireHeld = false;
   draggingView = false;
+  resetMobileInput();
   adsBlend = 0;
   crouchBlend = 0;
   resetGunSway();
@@ -5716,6 +5926,8 @@ menuBtn?.addEventListener("click", (e) => {
 function endGame() {
   playing = false;
   fireHeld = false;
+  resetMobileInput();
+  clearAmmoPickups();
   reloading = false;
   clearReloadSoundTimers();
   adsBlend = 0;
@@ -5793,6 +6005,7 @@ function resetGame() {
   reloadTimer = 0;
   clearReloadSoundTimers();
   fireHeld = false;
+  resetMobileInput();
   slideVelX = 0;
   slideVelZ = 0;
   slideCamOffsetX = 0;
@@ -5832,6 +6045,7 @@ function resetGame() {
     scene.remove(e.root);
   }
   clearGrenades();
+  clearAmmoPickups();
   enemies.length = 0;
   for (const sp of sparks) {
     scene.remove(sp.mesh);
@@ -5870,11 +6084,17 @@ function resetGame() {
 }
 
 function requestPlay() {
+  if (inputLayoutMobile === null) return;
   if (startBtn.textContent === "Start") {
     resetGame();
     useDragLook = false;
   }
   clearTimeout(lockFallbackTimer);
+  if (useMobileFriendlyUi()) {
+    useDragLook = true;
+    enterGame();
+    return;
+  }
   if (typeof canvas.requestPointerLock !== "function") {
     useDragLook = true;
     enterGame();
@@ -5894,6 +6114,13 @@ restartBtn.addEventListener("click", () => {
   gameoverEl.classList.add("hidden");
   useDragLook = false;
   clearTimeout(lockFallbackTimer);
+  fireHeld = false;
+  resetMobileInput();
+  if (useMobileFriendlyUi()) {
+    useDragLook = true;
+    enterGame();
+    return;
+  }
   if (typeof canvas.requestPointerLock !== "function") {
     useDragLook = true;
     enterGame();
@@ -5922,6 +6149,8 @@ document.addEventListener("pointerlockchange", () => {
   } else {
     if (useDragLook && playing) return;
     fireHeld = false;
+    resetMobileInput();
+    draggingView = false;
     adsBlend = 0;
     crouchBlend = 0;
     resetGunSway();
@@ -5948,6 +6177,17 @@ document.addEventListener("pointerlockerror", () => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if (
+    e.code === "Escape" &&
+    !e.repeat &&
+    inputLayoutModalOpen &&
+    inputLayoutMobile !== null
+  ) {
+    e.preventDefault();
+    inputLayoutModalOpen = false;
+    updateInputLayoutModalVisibility();
+    return;
+  }
   if (e.code === "Escape" && !e.repeat && overlay && !overlay.classList.contains("hidden")) {
     const openModal = document.querySelector("#overlay .menu-modal:not(.hidden)");
     if (openModal) {
@@ -6071,9 +6311,11 @@ document.addEventListener("keydown", (e) => {
 });
 document.addEventListener("keyup", (e) => keys.delete(e.code));
 
-document.addEventListener("mousemove", (e) => {
+document.addEventListener("pointermove", (e) => {
   if (!playing) return;
-  const aimSens = MOUSE_SENS * THREE.MathUtils.lerp(1, 0.74, adsBlend);
+  const touchMul = e.pointerType === "touch" ? TOUCH_LOOK_SENS_MUL : 1;
+  const aimSens =
+    MOUSE_SENS * THREE.MathUtils.lerp(1, 0.74, adsBlend) * touchMul;
   if (pointerLocked) {
     yaw.rotation.y -= e.movementX * aimSens;
     pitch.rotation.x -= e.movementY * aimSens;
@@ -6130,6 +6372,8 @@ window.addEventListener("mouseup", (e) => {
 
 window.addEventListener("blur", () => {
   fireHeld = false;
+  resetMobileInput();
+  draggingView = false;
   adsBlend = 0;
   crouchBlend = 0;
   slideCamOffsetX = 0;
@@ -6182,11 +6426,32 @@ function tick() {
 
   updatePracticeReactChallenge(now);
 
-  if (weaponBarEl)
+  const inLiveGame =
+    playing && health > 0 && gameoverEl?.classList.contains("hidden");
+  const showMobileHud = useMobileFriendlyUi() && inLiveGame;
+  const mobileRoot = document.getElementById("mobile-controls");
+  const mobileCombat = document.getElementById("mobile-combat-btns");
+  if (mobileRoot) {
+    mobileRoot.classList.toggle("hidden", !showMobileHud);
+    mobileRoot.setAttribute("aria-hidden", showMobileHud ? "false" : "true");
+  }
+  if (mobileCombat) {
+    mobileCombat.classList.toggle("hidden", !showMobileHud || practiceMode2);
+  }
+  if (!showMobileHud) {
+    resetMobileInput();
+  }
+
+  if (weaponBarEl) {
+    weaponBarEl.classList.toggle(
+      "allow-touch",
+      useMobileFriendlyUi() && inLiveGame && !practiceMode2
+    );
     weaponBarEl.classList.toggle(
       "hidden",
       !(playing && health > 0) || practiceMode2
     );
+  }
   if (practiceHintEl)
     practiceHintEl.classList.toggle(
       "hidden",
@@ -6201,7 +6466,7 @@ function tick() {
   if (playing && health > 0) {
     const wantAds =
       !practiceMode2 &&
-      keys.has("KeyE") &&
+      (keys.has("KeyE") || mobileAdsHeld) &&
       (activeWeapon === SLOT_PRIMARY || activeWeapon === SLOT_SECONDARY);
     const sniperAds = activeWeapon === SLOT_PRIMARY && loadoutChoice[SLOT_PRIMARY] === PRIMARY_INDEX_SNIPER;
     if (sniperAds && wantAds) {
@@ -6316,6 +6581,8 @@ function tick() {
         mx += right.x;
         mz += right.z;
       }
+      mx += forward.x * mobileFwd + right.x * mobileStrafe;
+      mz += forward.z * mobileFwd + right.z * mobileStrafe;
       const len = Math.hypot(mx, mz);
       const weaponMoveMul = moveMulForActiveSlot();
       const crouchHeld = keys.has("KeyC");
@@ -6437,7 +6704,10 @@ function tick() {
     }
 
     const stepSpeed = Math.hypot(slideVelX, slideVelZ);
-    const movingOnFoot = pSnap.vy === 0 && (stepSpeed > 1.2 || keys.has("KeyW") || keys.has("KeyA") || keys.has("KeyS") || keys.has("KeyD"));
+    const anyWasd =
+      keys.has("KeyW") || keys.has("KeyA") || keys.has("KeyS") || keys.has("KeyD");
+    const mobileWalkStick = Math.hypot(mobileFwd, mobileStrafe) > 0.12;
+    const movingOnFoot = pSnap.vy === 0 && (stepSpeed > 1.2 || anyWasd || mobileWalkStick);
     if (movingOnFoot) {
       footstepTimer -= dt;
       if (footstepTimer <= 0) {
@@ -6484,7 +6754,9 @@ function tick() {
     }
 
     const wantsFire =
-      (!useDragLook && fireHeld) || (useDragLook && keys.has("KeyF"));
+      (!useDragLook && fireHeld) ||
+      (useDragLook && keys.has("KeyF")) ||
+      mobileFireHeld;
     if (wantsFire) tryFire();
 
     if (practiceMovingTargets) {
@@ -6497,6 +6769,7 @@ function tick() {
       }
     }
     updateGrenades(dt);
+    updateAmmoPickups(dt);
 
     const playerPos = yaw.position;
     navFlowTimer -= dt;
@@ -6794,4 +7067,130 @@ syncCrosshairHudCssVars();
 updateWeaponHud();
 updateHealthHud();
 updateAmmoHud();
+
+weaponBarEl?.addEventListener("click", (e) => {
+  const row = e.target.closest?.(".weapon-slot[data-slot]");
+  if (!row || !weaponBarEl.classList.contains("allow-touch")) return;
+  e.preventDefault();
+  switchWeapon(Number(row.dataset.slot));
+});
+
+function initMobileControls() {
+  const zone = document.getElementById("mobile-joystick");
+  const stick = document.getElementById("mobile-joystick-stick");
+  const fireBtn = document.getElementById("mobile-btn-fire");
+  const aimBtn = document.getElementById("mobile-btn-aim");
+  if (!zone || !stick) return;
+
+  const maxDist = 44;
+  let originX = 0;
+  let originY = 0;
+
+  function applyStick(clientX, clientY) {
+    const dx = clientX - originX;
+    const dy = clientY - originY;
+    const len = Math.hypot(dx, dy) || 1;
+    const t = Math.min(len, maxDist) / len;
+    const kx = dx * t;
+    const ky = dy * t;
+    stick.style.transform = `translate(${kx}px, ${ky}px)`;
+    mobileStrafe = kx / maxDist;
+    mobileFwd = -ky / maxDist;
+  }
+
+  zone.addEventListener("pointerdown", (e) => {
+    if (!useMobileFriendlyUi() || !playing) return;
+    e.preventDefault();
+    const r = zone.getBoundingClientRect();
+    originX = r.left + r.width / 2;
+    originY = r.top + r.height / 2;
+    mobileJoyPointerId = e.pointerId;
+    try {
+      zone.setPointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+    applyStick(e.clientX, e.clientY);
+  });
+
+  zone.addEventListener("pointermove", (e) => {
+    if (mobileJoyPointerId == null || e.pointerId !== mobileJoyPointerId) return;
+    applyStick(e.clientX, e.clientY);
+  });
+
+  function endJoy(e) {
+    if (mobileJoyPointerId == null || e.pointerId !== mobileJoyPointerId) return;
+    mobileJoyPointerId = null;
+    try {
+      zone.releasePointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+    mobileFwd = 0;
+    mobileStrafe = 0;
+    stick.style.transform = "translate(0, 0)";
+  }
+
+  zone.addEventListener("pointerup", endJoy);
+  zone.addEventListener("pointercancel", endJoy);
+
+  fireBtn?.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    mobileFireHeld = true;
+    try {
+      fireBtn.setPointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+  fireBtn?.addEventListener("pointerup", (e) => {
+    mobileFireHeld = false;
+    try {
+      fireBtn.releasePointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+  fireBtn?.addEventListener("pointercancel", () => {
+    mobileFireHeld = false;
+  });
+
+  aimBtn?.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    mobileAdsHeld = true;
+    try {
+      aimBtn.setPointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+  aimBtn?.addEventListener("pointerup", (e) => {
+    mobileAdsHeld = false;
+    try {
+      aimBtn.releasePointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+  aimBtn?.addEventListener("pointercancel", () => {
+    mobileAdsHeld = false;
+  });
+}
+
+initMobileControls();
+
+document.getElementById("input-layout-mobile-btn")?.addEventListener("click", () =>
+  setInputLayoutMobile(true)
+);
+document.getElementById("input-layout-desktop-btn")?.addEventListener("click", () =>
+  setInputLayoutMobile(false)
+);
+document.getElementById("menu-open-input-layout")?.addEventListener("click", () =>
+  openInputLayoutChoiceModal()
+);
+
+updateInputLayoutModalVisibility();
+syncStartButtonForLayout();
+syncInputLayoutMenuLabel();
+
 tick();
