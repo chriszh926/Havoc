@@ -4859,6 +4859,43 @@ function buildRattlesnakeBoss() {
     emissiveIntensity: 0.08,
   });
   registerMat(rattleMat, 0x322818, 0.08);
+  const mouthInterior = new THREE.MeshStandardMaterial({
+    color: 0x120606,
+    roughness: 0.92,
+    metalness: 0,
+    emissive: 0x280808,
+    emissiveIntensity: 0.14,
+  });
+  registerMat(mouthInterior, 0x280808, 0.14);
+  const fangMat = new THREE.MeshStandardMaterial({
+    color: 0xeee8dc,
+    roughness: 0.32,
+    metalness: 0.12,
+    emissive: 0x2a2218,
+    emissiveIntensity: 0.07,
+  });
+  registerMat(fangMat, 0x2a2218, 0.07);
+  const snakeEyeMat = new THREE.MeshStandardMaterial({
+    color: 0x050504,
+    roughness: 0.18,
+    metalness: 0.22,
+    emissive: 0x0a180a,
+    emissiveIntensity: 0.22,
+  });
+  registerMat(snakeEyeMat, 0x0a180a, 0.22);
+  const tongueMat = new THREE.MeshStandardMaterial({
+    color: 0xc03848,
+    roughness: 0.55,
+    metalness: 0,
+    emissive: 0x401018,
+    emissiveIntensity: 0.1,
+  });
+  registerMat(tongueMat, 0x401018, 0.1);
+
+  /** Local +Z is chase direction; mirror Z and rotate 180° so head/snout lead, not the rattle. */
+  const body = new THREE.Group();
+  body.rotation.y = Math.PI;
+  root.add(body);
 
   const n = 20;
   const snakeSegments = [];
@@ -4866,7 +4903,7 @@ function buildRattlesnakeBoss() {
     const u = i / (n - 1);
     const t = u * Math.PI * 1.22;
     const x = Math.sin(t * 1.38) * 0.54 * (0.32 + 0.68 * Math.sin(u * Math.PI));
-    const z = -2.38 + u * 4.92;
+    const z = 2.38 - u * 4.92;
     const r = 0.14 + Math.sin(u * Math.PI) * 0.125 * 1.08 + (1 - u) * 0.05;
     const y = r * 0.4 + 0.025;
 
@@ -4879,7 +4916,7 @@ function buildRattlesnakeBoss() {
     seg.position.set(x, y, z);
     if (i === n - 1) seg.userData.hitZone = "head";
     seg.castShadow = true;
-    root.add(seg);
+    body.add(seg);
     snakeSegments.push({
       mesh: seg,
       baseX: seg.position.x,
@@ -4890,20 +4927,130 @@ function buildRattlesnakeBoss() {
 
   const head = snakeSegments[n - 1].mesh;
   const headR = head.geometry.parameters.radius;
-  const snout = new THREE.Mesh(
-    new THREE.ConeGeometry(headR * 0.92, 0.42, 6),
+  /** Forward along neck sphere local −Z (strike direction after body flip). */
+  const hr = headR * 1.85;
+
+  const headAssy = new THREE.Group();
+  headAssy.position.set(0, headR * 0.04, -headR * 0.52);
+  head.add(headAssy);
+
+  function markHead(m) {
+    m.userData.hitZone = "head";
+    m.castShadow = true;
+    headAssy.add(m);
+  }
+
+  const cranium = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.52, 14, 12), diamond);
+  cranium.scale.set(1.62, 0.78, 1.12);
+  cranium.position.set(0, hr * 0.14, -hr * 0.38);
+  markHead(cranium);
+
+  const crown = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.44, 10, 8), dorsal);
+  crown.scale.set(1.35, 0.55, 0.95);
+  crown.position.set(0, hr * 0.32, -hr * 0.28);
+  markHead(crown);
+
+  const snoutTop = new THREE.Mesh(
+    new THREE.CylinderGeometry(hr * 0.22, hr * 0.42, hr * 0.88, 10),
     dorsal
   );
-  snout.rotation.x = Math.PI / 2;
-  snout.position.set(0, headR * 0.05, headR * 0.98);
-  snout.castShadow = true;
-  head.add(snout);
+  snoutTop.rotation.x = Math.PI / 2;
+  snoutTop.position.set(0, hr * 0.02, -hr * 1.02);
+  markHead(snoutTop);
+
+  const snoutTip = new THREE.Mesh(new THREE.ConeGeometry(hr * 0.26, hr * 0.36, 8), dorsal);
+  snoutTip.rotation.x = -Math.PI / 2;
+  snoutTip.position.set(0, -hr * 0.02, -hr * 1.52);
+  markHead(snoutTip);
+
+  const jawPivot = new THREE.Group();
+  jawPivot.position.set(0, -hr * 0.12, -hr * 0.22);
+  jawPivot.rotation.x = 0.36;
+  headAssy.add(jawPivot);
+
+  const lowerJaw = new THREE.Mesh(
+    new THREE.BoxGeometry(hr * 0.95, hr * 0.2, hr * 0.72),
+    belly
+  );
+  lowerJaw.position.set(0, -hr * 0.12, -hr * 0.58);
+  lowerJaw.rotation.x = -0.06;
+  lowerJaw.userData.hitZone = "head";
+  lowerJaw.castShadow = true;
+  jawPivot.add(lowerJaw);
+
+  const mouthRoof = new THREE.Mesh(
+    new THREE.BoxGeometry(hr * 0.38, hr * 0.12, hr * 0.36),
+    mouthInterior
+  );
+  mouthRoof.position.set(0, -hr * 0.08, -hr * 0.72);
+  markHead(mouthRoof);
+
+  const mouthFloor = new THREE.Mesh(
+    new THREE.BoxGeometry(hr * 0.36, hr * 0.1, hr * 0.32),
+    mouthInterior
+  );
+  mouthFloor.position.set(0, -hr * 0.28, -hr * 0.7);
+  markHead(mouthFloor);
+
+  const mouthBack = new THREE.Mesh(
+    new THREE.BoxGeometry(hr * 0.32, hr * 0.26, hr * 0.08),
+    mouthInterior
+  );
+  mouthBack.position.set(0, -hr * 0.17, -hr * 0.52);
+  markHead(mouthBack);
+
+  function addFang(px) {
+    const fang = new THREE.Mesh(new THREE.ConeGeometry(hr * 0.045, hr * 0.36, 6), fangMat);
+    fang.rotation.order = "YXZ";
+    fang.rotation.x = Math.PI * 0.52;
+    fang.rotation.z = px > 0 ? -0.14 : 0.14;
+    fang.position.set(px, -hr * 0.06, -hr * 1.38);
+    markHead(fang);
+  }
+  addFang(hr * 0.14);
+  addFang(-hr * 0.14);
+
+  function addEye(px) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.065, 10, 8), snakeEyeMat);
+    eye.scale.set(1, 1.35, 0.72);
+    eye.position.set(px, hr * 0.22, -hr * 0.62);
+    markHead(eye);
+    const slit = new THREE.Mesh(
+      new THREE.BoxGeometry(hr * 0.018, hr * 0.07, hr * 0.04),
+      snakeEyeMat
+    );
+    slit.position.set(px * 1.02, hr * 0.22, -hr * 0.64);
+    markHead(slit);
+  }
+  addEye(hr * 0.38);
+  addEye(-hr * 0.38);
+
+  const tongueStem = new THREE.Mesh(
+    new THREE.BoxGeometry(hr * 0.08, hr * 0.04, hr * 0.22),
+    tongueMat
+  );
+  tongueStem.position.set(0, -hr * 0.2, -hr * 1.12);
+  markHead(tongueStem);
+  const forkL = new THREE.Mesh(
+    new THREE.BoxGeometry(hr * 0.035, hr * 0.028, hr * 0.14),
+    tongueMat
+  );
+  forkL.position.set(-hr * 0.04, -hr * 0.2, -hr * 1.28);
+  forkL.rotation.y = 0.28;
+  markHead(forkL);
+  const forkR = new THREE.Mesh(
+    new THREE.BoxGeometry(hr * 0.035, hr * 0.028, hr * 0.14),
+    tongueMat
+  );
+  forkR.position.set(hr * 0.04, -hr * 0.2, -hr * 1.28);
+  forkR.rotation.y = -0.28;
+  markHead(forkR);
 
   const tail = snakeSegments[0].mesh;
   const tx = tail.position.x;
   const ty = tail.position.y;
   const tz = tail.position.z;
-  let bz = tz - 0.12;
+  let bz = tz + 0.12;
   for (let b = 0; b < 5; b++) {
     const bandMat = b % 2 === 0 ? tailBlack : tailWhite;
     const ring = new THREE.Mesh(
@@ -4913,21 +5060,20 @@ function buildRattlesnakeBoss() {
     ring.rotation.x = Math.PI / 2;
     ring.position.set(tx * 0.88, ty + 0.018, bz);
     ring.castShadow = true;
-    root.add(ring);
-    bz -= 0.052;
+    body.add(ring);
+    bz += 0.052;
   }
   for (let ri = 0; ri < 7; ri++) {
     const bell = new THREE.Mesh(
       new THREE.SphereGeometry(0.048 + ri * 0.01, 8, 8),
       rattleMat
     );
-    bell.position.set(tx * 0.82, ty + 0.032, bz - ri * 0.084);
+    bell.position.set(tx * 0.82, ty + 0.032, bz + ri * 0.084);
     bell.castShadow = true;
-    root.add(bell);
+    body.add(bell);
   }
 
-  root.rotation.y = Math.PI * 0.5;
-  return { root, mats, matBases, snakeSegments };
+  return { root, mats, matBases, snakeSegments, headJawPivot: jawPivot };
 }
 
 /** Lean wolf: tapered torso, neck, cranium + snout, cone ears, bushy tail. */
@@ -5487,7 +5633,7 @@ function spawnMapBossEnemy() {
   if (enemies.length >= MAX_LIVING_ENEMIES) return;
   const forest = activeMapId === "forest";
   const built = forest ? buildRattlesnakeBoss() : buildKnightBoss();
-  const { root, mats, matBases, snakeSegments } = built;
+  const { root, mats, matBases, snakeSegments, headJawPivot } = built;
   if (forest) root.scale.setScalar(1.72);
   const pos = randomSpawnPoint();
   root.position.copy(pos);
@@ -5508,6 +5654,7 @@ function spawnMapBossEnemy() {
         isMapBoss: true,
         isRattlesnakeBoss: true,
         snakeSegments: snakeSegments ?? null,
+        headJawPivot: headJawPivot ?? null,
         snakeAttackBlend: 0,
         mats,
         matBases,
@@ -8282,6 +8429,10 @@ function tick() {
         const reach = e.meleeReach ?? 2.5;
         const closing = THREE.MathUtils.smoothstep(dist / Math.max(0.25, reach), 1.28, 0.68);
         e.snakeAttackBlend = THREE.MathUtils.lerp(e.snakeAttackBlend ?? 0, closing, 1 - Math.exp(-5.8 * dt));
+        if (e.headJawPivot) {
+          const b = e.snakeAttackBlend ?? 0;
+          e.headJawPivot.rotation.x = 0.34 + b * 0.48;
+        }
         const ux = -dz / dist;
         const uz = dx / dist;
         const wMul = (1 - (e.snakeAttackBlend ?? 0)) * Math.min(1.15, dist / 10);
