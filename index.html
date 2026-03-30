@@ -7,6 +7,14 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <div id="game-intro" class="game-intro" aria-hidden="false" role="presentation">
+      <div class="game-intro-inner">
+        <div class="game-intro-curtain game-intro-curtain--left" aria-hidden="true"></div>
+        <div class="game-intro-curtain game-intro-curtain--right" aria-hidden="true"></div>
+        <p class="game-intro-title">HAVOC</p>
+        <p class="game-intro-hint">Click or tap to skip</p>
+      </div>
+    </div>
     <div id="hud">
       <div id="practice-react-flash" class="practice-react-flash hidden" aria-hidden="true"></div>
       <div
@@ -50,6 +58,7 @@
       </div>
       <div id="damage-floaters" aria-hidden="true"></div>
       <div id="damage-vignette" class="damage-vignette" aria-hidden="true"></div>
+      <div id="game-deploy-flash" class="game-deploy-flash" aria-hidden="true"></div>
       <div id="sniper-scope" class="sniper-scope hidden" aria-hidden="true">
         <div class="sniper-scope-lens">
           <div class="sniper-scope-cross sniper-scope-cross-h"></div>
@@ -121,9 +130,11 @@
       </div>
       <div id="stats">
         <span id="score">Score: 0</span>
+        <span id="level" class="stats-level"></span>
         <span id="health">Health: 150</span>
         <span id="ammo">Rifle: 20 / 200</span>
       </div>
+      <pre id="mp-scoreboard" class="mp-scoreboard hidden" aria-live="polite"></pre>
       <p id="practice-hint" class="practice-hint hidden" aria-live="polite"></p>
       <div id="health-bar-wrap" aria-hidden="true">
         <div id="health-bar-fill"></div>
@@ -205,9 +216,49 @@
               </div>
             </section>
 
-            <section class="menu-block menu-block--last" aria-labelledby="menu-kit-h">
+            <section class="menu-block" aria-labelledby="menu-mp-h">
               <div class="menu-block-head">
                 <span class="menu-block-idx" aria-hidden="true">03</span>
+                <h2 class="menu-block-title" id="menu-mp-h">Multiplayer</h2>
+              </div>
+              <p class="menu-block-note">
+                Authoritative <strong>PvP deathmatch</strong> (courtyard + assault rifle only for now).
+                <strong>Before Deploy:</strong> run <kbd class="menu-kbd">npm run mp-server</kbd> in a separate terminal
+                (same project folder); then use Deploy. Or point the URL at your hosted server. Uses
+                <strong>Socket.IO</strong> over <code>http://</code> (not <code>ws://</code>).
+              </p>
+              <button type="button" class="menu-start-btn menu-start-btn--secondary" id="mp-launch-online">
+                Multiplayer: enable &amp; scroll to room
+              </button>
+              <label class="menu-pick" for="mp-enabled">
+                <input type="checkbox" id="mp-enabled" />
+                <span class="menu-pick-body">
+                  <span class="menu-pick-name">Join multiplayer session</span>
+                  <span class="menu-pick-detail">Disable practice · connect on Deploy · server validates hits &amp; ammo</span>
+                </span>
+              </label>
+              <div class="mp-fields">
+                <label class="mp-field">
+                  <span class="mp-field-label">Room id</span>
+                  <input type="text" id="mp-room" class="mp-field-input" maxlength="48" value="havoc1" autocomplete="off" />
+                </label>
+                <label class="mp-field">
+                  <span class="mp-field-label">Server URL (http://…)</span>
+                  <input
+                    type="text"
+                    id="mp-server"
+                    class="mp-field-input"
+                    spellcheck="false"
+                    autocomplete="off"
+                    placeholder="Dev: same as address bar — proxies to mp-server"
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section class="menu-block menu-block--last" aria-labelledby="menu-kit-h">
+              <div class="menu-block-head">
+                <span class="menu-block-idx" aria-hidden="true">04</span>
                 <h2 class="menu-block-title" id="menu-kit-h">Arena &amp; kit</h2>
               </div>
               <p class="menu-block-note">
@@ -240,7 +291,7 @@
               <li><kbd>WASD</kbd> move · <kbd>Space</kbd> jump (hold to jump again on landing) · <kbd>C</kbd> crouch</li>
               <li><kbd>E</kbd> aim down sights · <kbd>R</kbd> reload</li>
               <li><kbd>1</kbd>–<kbd>4</kbd> primary / secondary / melee / utility</li>
-              <li><kbd>Q</kbd> dash · <kbd>V</kbd> third-person camera · <kbd>M</kbd> menu / pause</li>
+              <li><kbd>Q</kbd> dash · <kbd>M</kbd> menu / pause</li>
               <li><kbd>Left click</kbd> fire · <kbd>F</kbd> fire when using drag-to-look</li>
             </ul>
             <button type="button" class="menu-modal-close" data-close-menu-modal>Close</button>
@@ -276,6 +327,7 @@
                     <option value="0">Handgun</option>
                     <option value="1">Heavy Pistol</option>
                     <option value="2">Revolver</option>
+                    <option value="3">Uzi</option>
                   </select>
                 </div>
                 <div class="loadout-row">
@@ -292,6 +344,7 @@
                     <option value="0">Resupply</option>
                     <option value="1">Medkit</option>
                     <option value="2">Grenade</option>
+                    <option value="3">Silver Fan</option>
                   </select>
                 </div>
               </div>

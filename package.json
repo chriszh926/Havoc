@@ -5,13 +5,21 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "mp-server": "tsx server/src/index.ts",
+    "mp-server:build": "tsc -p server/tsconfig.json && node dist-server/index.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.100.1",
-    "three": "^0.169.0"
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "three": "^0.169.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
     "vite": "^5.4.11"
   }
 }
