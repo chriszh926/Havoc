@@ -989,3 +989,237 @@ export function playPracticeReactSuccess() {
     o.stop(t + 0.42);
   }
 }
+
+let adventureAmbienceTimer = 0;
+
+const ADVENTURE_AMBIENCE_STAGES = [
+  { base: 58, fifth: 86, interval: 720, pulse: "sine" },
+  { base: 67, fifth: 100, interval: 680, pulse: "triangle" },
+  { base: 52, fifth: 78, interval: 640, pulse: "sine" },
+  { base: 62, fifth: 93, interval: 600, pulse: "triangle" },
+  { base: 46, fifth: 69, interval: 560, pulse: "sine" },
+];
+
+/** Procedural layer per stage: root + fifth drone, rate and wave shape vary by zone. */
+export function startAdventureAmbienceStage(stage) {
+  const c = getCtx();
+  if (!c) return;
+  stopAdventureAmbience();
+  const spec = ADVENTURE_AMBIENCE_STAGES[Math.min(4, Math.max(0, stage))] ?? ADVENTURE_AMBIENCE_STAGES[0];
+  adventureAmbienceTimer = window.setInterval(() => {
+    const ctx = getCtx();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const d = getSfxOut(ctx);
+    const oRoot = ctx.createOscillator();
+    oRoot.type = spec.pulse;
+    oRoot.frequency.setValueAtTime(spec.base, t);
+    const g0 = ctx.createGain();
+    g0.gain.setValueAtTime(0, t);
+    g0.gain.linearRampToValueAtTime(0.045 + stage * 0.006, t + 0.05);
+    g0.gain.exponentialRampToValueAtTime(0.001, t + 0.92 + stage * 0.05);
+    oRoot.connect(g0).connect(d);
+    oRoot.start(t);
+    oRoot.stop(t + 1.05);
+
+    const oHi = ctx.createOscillator();
+    oHi.type = "sine";
+    oHi.frequency.setValueAtTime(spec.fifth, t);
+    const g1 = ctx.createGain();
+    g1.gain.setValueAtTime(0, t);
+    g1.gain.linearRampToValueAtTime(0.028 + stage * 0.004, t + 0.07);
+    g1.gain.exponentialRampToValueAtTime(0.001, t + 0.78);
+    oHi.connect(g1).connect(d);
+    oHi.start(t + 0.02);
+    oHi.stop(t + 0.88);
+
+    if (stage >= 2) {
+      const tick = ctx.createOscillator();
+      tick.type = "square";
+      tick.frequency.setValueAtTime(220 + stage * 40, t);
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.setValueAtTime(420, t);
+      const gt = ctx.createGain();
+      gt.gain.setValueAtTime(0, t);
+      gt.gain.linearRampToValueAtTime(0.018, t + 0.01);
+      gt.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+      tick.connect(lp).connect(gt).connect(d);
+      tick.start(t);
+      tick.stop(t + 0.07);
+    }
+  }, spec.interval);
+}
+
+/** Short cadence when a barrier opens (stage index 0–3). */
+export function playAdventureStageSting(gateIdx) {
+  const c = getCtx();
+  if (!c) return;
+  const dest = getSfxOut(c);
+  const t = c.currentTime;
+  const roots = [196, 220, 174.62, 233.08];
+  const third = [246.94, 277.18, 220, 293.66];
+  const i = Math.min(3, Math.max(0, gateIdx));
+  const seq = [
+    [roots[i], 0],
+    [third[i], 0.07],
+    [roots[i] * 1.5, 0.15],
+  ];
+  for (const [hz, off] of seq) {
+    const o = c.createOscillator();
+    o.type = "triangle";
+    o.frequency.value = hz;
+    const g = c.createGain();
+    g.gain.setValueAtTime(0, t + off);
+    g.gain.linearRampToValueAtTime(0.1 - off * 0.15, t + off + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.001, t + off + 0.35);
+    o.connect(g).connect(dest);
+    o.start(t + off);
+    o.stop(t + off + 0.4);
+  }
+}
+
+/** Boss shifts phase (HP thirds; phase index 1 or 2). */
+export function playAdventureBossPhaseShift(phase) {
+  const c = getCtx();
+  if (!c) return;
+  const dest = getSfxOut(c);
+  const t = c.currentTime;
+  const lo = phase >= 2 ? 82 : 98;
+  const hi = phase >= 2 ? 165 : 147;
+  const sweep = c.createOscillator();
+  sweep.type = "sawtooth";
+  sweep.frequency.setValueAtTime(lo, t);
+  sweep.frequency.exponentialRampToValueAtTime(hi, t + 0.18);
+  const lp = c.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(900, t);
+  lp.frequency.exponentialRampToValueAtTime(280, t + 0.2);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.09, t + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+  sweep.connect(lp).connect(g).connect(dest);
+  sweep.start(t);
+  sweep.stop(t + 0.32);
+
+  const bell = c.createOscillator();
+  bell.type = "sine";
+  bell.frequency.setValueAtTime(phase >= 2 ? 523.25 : 392, t + 0.12);
+  const gb = c.createGain();
+  gb.gain.setValueAtTime(0, t + 0.1);
+  gb.gain.linearRampToValueAtTime(0.08, t + 0.13);
+  gb.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+  bell.connect(gb).connect(dest);
+  bell.start(t + 0.1);
+  bell.stop(t + 0.44);
+}
+
+export function stopAdventureAmbience() {
+  if (adventureAmbienceTimer) {
+    window.clearInterval(adventureAmbienceTimer);
+    adventureAmbienceTimer = 0;
+  }
+}
+
+export function playAdventureGateOpen() {
+  const c = getCtx();
+  if (!c) return;
+  const dest = getSfxOut(c);
+  const t = c.currentTime;
+  const n = c.createBufferSource();
+  n.buffer = makePinkNoiseBuffer(c, 0.28, 1.05, 0.75);
+  const hp = c.createBiquadFilter();
+  hp.type = "bandpass";
+  hp.frequency.setValueAtTime(420, t);
+  hp.frequency.exponentialRampToValueAtTime(120, t + 0.24);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0.18, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.32);
+  n.connect(hp).connect(g).connect(dest);
+  n.start(t);
+
+  const sweep = c.createOscillator();
+  sweep.type = "triangle";
+  sweep.frequency.setValueAtTime(180, t);
+  sweep.frequency.exponentialRampToValueAtTime(45, t + 0.22);
+  const gs = c.createGain();
+  gs.gain.setValueAtTime(0, t);
+  gs.gain.linearRampToValueAtTime(0.11, t + 0.02);
+  gs.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+  sweep.connect(gs).connect(dest);
+  sweep.start(t);
+  sweep.stop(t + 0.3);
+}
+
+export function playAdventureCheckpointPing() {
+  const c = getCtx();
+  if (!c) return;
+  const dest = getSfxOut(c);
+  const t = c.currentTime;
+  const freqs = [392, 523.25, 659.25];
+  for (let i = 0; i < freqs.length; i++) {
+    const o = c.createOscillator();
+    o.type = "sine";
+    o.frequency.value = freqs[i];
+    const g = c.createGain();
+    g.gain.setValueAtTime(0, t + i * 0.045);
+    g.gain.linearRampToValueAtTime(0.11, t + i * 0.045 + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.42);
+    o.connect(g).connect(dest);
+    o.start(t + i * 0.045);
+    o.stop(t + 0.48);
+  }
+}
+
+/** Short rising chirp when the boss telegraphs a ground slam. */
+export function playAdventureBossTelegraph() {
+  const c = getCtx();
+  if (!c) return;
+  const dest = getSfxOut(c);
+  const t = c.currentTime;
+  const o = c.createOscillator();
+  o.type = "square";
+  o.frequency.setValueAtTime(95, t);
+  o.frequency.exponentialRampToValueAtTime(440, t + 0.11);
+  const lp = c.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(900, t);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.07, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+  o.connect(lp).connect(g).connect(dest);
+  o.start(t);
+  o.stop(t + 0.18);
+}
+
+export function playAdventureBossSlam() {
+  const c = getCtx();
+  if (!c) return;
+  const dest = getSfxOut(c);
+  const t = c.currentTime;
+  const boom = c.createOscillator();
+  boom.type = "sine";
+  boom.frequency.setValueAtTime(58, t);
+  boom.frequency.exponentialRampToValueAtTime(22, t + 0.14);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.32, t + 0.006);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+  boom.connect(g).connect(dest);
+  boom.start(t);
+  boom.stop(t + 0.22);
+
+  const crackBuf = makePinkNoiseBuffer(c, 0.14, 1.12, 1);
+  const crack = c.createBufferSource();
+  crack.buffer = crackBuf;
+  const hp = c.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.setValueAtTime(140, t);
+  const g2 = c.createGain();
+  g2.gain.setValueAtTime(0.16, t);
+  g2.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  crack.connect(hp).connect(g2).connect(dest);
+  crack.start(t);
+}

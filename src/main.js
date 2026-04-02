@@ -25,6 +25,14 @@ import {
   playGrenadeExplosion,
   playPracticeFlashCue,
   playPracticeReactSuccess,
+  startAdventureAmbienceStage,
+  stopAdventureAmbience,
+  playAdventureGateOpen,
+  playAdventureCheckpointPing,
+  playAdventureBossTelegraph,
+  playAdventureBossSlam,
+  playAdventureStageSting,
+  playAdventureBossPhaseShift,
 } from "./sounds.js";
 import {
   connectMpDm,
@@ -46,6 +54,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 
 const canvas = document.getElementById("c");
 const overlay = document.getElementById("overlay");
@@ -320,8 +329,13 @@ const COLLIDE_CLEAR_ABOVE_TOP = 0.08;
 const COLLIDE_ON_TOP_BAND_BELOW = 0.045;
 /** Bob / snap above platform top while supported. */
 const COLLIDE_ON_TOP_BAND_ABOVE = 0.18;
+/**
+ * Volumes taller than this still get XZ wall pushes when feet are in the "on top" band —
+ * stops tall props/gates from being skipped while standing on thick climb geometry (stairs).
+ */
+const COLLIDE_TOP_BAND_WALKABLE_MAX_HEIGHT = 0.4;
 /** Enemy XZ moves per frame are split so thin geometry is not tunnelled through. */
-const ENEMY_MOVE_SUBSTEPS = 10;
+const ENEMY_MOVE_SUBSTEPS = 14;
 const SLOT_PRIMARY = 0;
 const SLOT_SECONDARY = 1;
 const SLOT_MELEE = 2;
@@ -768,6 +782,74 @@ let practiceMovingTargets = false;
 let practiceMode2 = false;
 /** True when either practice mode is active (no waves / enemy damage). */
 let practiceMode = false;
+/** Adventure campaign: gated trail → climb → summit → boss (single `adventure` map). */
+let adventureMode = false;
+/** Segment index 0..3 = kill zones before gates; "boss" = finale. */
+let adventureStage = "off";
+let adventureSpawnTimer = 0;
+let adventureBossSpawned = false;
+let adventureSegmentKills = 0;
+/** Gate index we are clearing toward (0..3). */
+let adventureActiveGateIndex = 0;
+const adventureGatesOpened = [false, false, false, false];
+let adventureLives = 3;
+const adventureCheckpointPos = new THREE.Vector3(0, 0, -28);
+let adventureCheckpointValid = true;
+const ADVENTURE_LIVES_MAX = 3;
+/** Half-extent for adventure playable/nav/clamp (larger than `ARENA`). */
+const ADVENTURE_ARENA = 46;
+/** Player start + respawn (first trail area); checkpoint is not advanced past gates. */
+const ADVENTURE_PLAYER_START_Z = -28;
+const ADVENTURE_GATE_Z = [2.2, 19.5, 36.5, 53];
+/** Boss fight plateau: block uses y center + h/2 = this feet level. */
+const ADVENTURE_BOSS_ARENA_Z = 78.5;
+const ADVENTURE_BOSS_PLATFORM_FEET_Y = 15.925;
+const ADVENTURE_KILLS_PER_GATE = [25, 25, 25, 40];
+const ADVENTURE_SPAWN_INTERVAL = [2.05, 2.15, 2.28, 2.35];
+const ADVENTURE_CAP_PER_SEGMENT = [36, 36, 36, 50];
+/** @type {{ mesh: THREE.Mesh|null, vol: object|null, gateIdx: number, open: boolean, falling: boolean, fallY: number, killCanvas?: HTMLCanvasElement, killCtx?: CanvasRenderingContext2D|null, killTex?: THREE.CanvasTexture, hudShownKills?: number, hudStaggerNextAt?: number }[]} */
+let adventureGateActors = [];
+
+const ADVENTURE_SEGMENT_SPAWNS = [
+  [
+    [-16, -26],
+    [14, -24],
+    [-8, -30],
+    [12, -28],
+    [-4, -32],
+    [6, -22],
+    [0, -27],
+  ],
+  [
+    [-10, 8],
+    [12, 10],
+    [-12, 14],
+    [10, 12],
+    [0, 6],
+    [-6, 11],
+  ],
+  [
+    [-8, 26],
+    [9, 24],
+    [0, 28],
+    [-10, 30],
+    [10, 32],
+  ],
+  [
+    [-14, 44],
+    [14, 42],
+    [-8, 48],
+    [12, 46],
+    [0, 50],
+    [16, 40],
+  ],
+];
+/** Red ring: adventure boss slam only. */
+let adventureBossSlamRing = null;
+let adventureBossSlamRingMat = null;
+/** Cyan ring: summit environmental hazard (pre-boss and during boss). */
+let adventureEnvHazardRing = null;
+let adventureEnvHazardRingMat = null;
 
 function practicePrimaryInfiniteAmmo() {
   return practiceMode && !practiceMode2 && activeWeapon === SLOT_PRIMARY;
@@ -900,6 +982,658 @@ function triggerPractice2ObbyFinish() {
       streakToastEl?.classList.add("streak-toast-out");
       window.setTimeout(() => streakToastEl?.classList.add("hidden"), 320);
     }, 2800);
+  }
+}
+
+function showAdventureToast(text, ms = 2600) {
+  if (!streakToastEl) return;
+  clearTimeout(streakToastHideT);
+  streakToastEl.textContent = text;
+  streakToastEl.classList.remove("hidden", "streak-toast-out");
+  void streakToastEl.offsetWidth;
+  streakToastEl.classList.add("streak-toast-in");
+  streakToastHideT = window.setTimeout(() => {
+    streakToastEl?.classList.add("streak-toast-out");
+    window.setTimeout(() => streakToastEl?.classList.add("hidden"), 320);
+  }, ms);
+}
+
+function clearAllLiveEnemies() {
+  for (const e of enemies) {
+    clearEnemyDamagePopup(e);
+    scene.remove(e.root);
+  }
+  enemies.length = 0;
+}
+
+function spawnEnemyNear(x, z, isAdventureEnemy = false, hpMul = 1, speedMul = 1, dmgMul = 1) {
+  const before = enemies.length;
+  spawnEnemy();
+  if (enemies.length <= before) return null;
+  const e = enemies[enemies.length - 1];
+  e.root.position.x = x;
+  e.root.position.z = z;
+  const rad = e.collideRadius ?? ENEMY_COLLIDE_RADIUS;
+  const snap = snapFeetToSupport(x, z, rad, e.baseY ?? 0, e.velY ?? 0);
+  e.baseY = snap.y;
+  e.velY = snap.vy;
+  e.root.position.y = e.baseY;
+  if (isAdventureEnemy) e.isAdventureEnemy = true;
+  if (hpMul !== 1) e.hp = Math.max(1, Math.round(e.hp * hpMul));
+  if (speedMul !== 1) e.speedMul = (e.speedMul ?? 1) * speedMul;
+  if (dmgMul !== 1) e.damage = Math.max(1, Math.round((e.damage ?? ENEMY_DAMAGE) * dmgMul));
+  return e;
+}
+
+function disposeAdventureGateMeshes() {
+  for (const g of adventureGateActors) {
+    if (g.vol) {
+      const idx = levelVolumes.indexOf(g.vol);
+      if (idx >= 0) levelVolumes.splice(idx, 1);
+    }
+    if (g.mesh) {
+      g.mesh.traverse((o) => {
+        o.geometry?.dispose();
+        const m = o.material;
+        if (m && !Array.isArray(m)) {
+          m.map?.dispose?.();
+          m.dispose();
+        }
+      });
+      g.mesh.parent?.remove(g.mesh);
+    }
+  }
+  adventureGateActors.length = 0;
+}
+
+function ensureAdventureSlamRing() {
+  if (adventureBossSlamRing) return;
+  const geo = new THREE.RingGeometry(0.35, 1, 48);
+  adventureBossSlamRingMat = new THREE.MeshBasicMaterial({
+    color: 0xff4422,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  adventureBossSlamRing = new THREE.Mesh(geo, adventureBossSlamRingMat);
+  adventureBossSlamRing.rotation.x = -Math.PI / 2;
+  adventureBossSlamRing.visible = false;
+  adventureExtrasRoot.add(adventureBossSlamRing);
+}
+
+function ensureAdventureEnvHazardRing() {
+  if (adventureEnvHazardRing) return;
+  const geo = new THREE.RingGeometry(0.35, 1, 48);
+  adventureEnvHazardRingMat = new THREE.MeshBasicMaterial({
+    color: 0x44ddff,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  adventureEnvHazardRing = new THREE.Mesh(geo, adventureEnvHazardRingMat);
+  adventureEnvHazardRing.rotation.x = -Math.PI / 2;
+  adventureEnvHazardRing.visible = false;
+  adventureExtrasRoot.add(adventureEnvHazardRing);
+}
+
+function hideAdventureSlamRing() {
+  if (adventureBossSlamRing) {
+    adventureBossSlamRing.visible = false;
+    adventureBossSlamRingMat.opacity = 0;
+  }
+}
+
+function hideAdventureEnvHazardRing() {
+  if (adventureEnvHazardRing) {
+    adventureEnvHazardRing.visible = false;
+    adventureEnvHazardRingMat.opacity = 0;
+  }
+}
+
+function hideAllAdventureRings() {
+  hideAdventureSlamRing();
+  hideAdventureEnvHazardRing();
+}
+
+/** Floor Y for telegraph rings (slam / env hazard) at optional world XZ. */
+function syncAdventureCheckpointToStart() {
+  const snap = snapFeetToSupport(
+    0,
+    ADVENTURE_PLAYER_START_Z,
+    PLAYER_RADIUS,
+    0.55,
+    0
+  );
+  adventureCheckpointPos.set(0, snap.y, ADVENTURE_PLAYER_START_Z);
+  adventureCheckpointValid = true;
+}
+
+function adventureTelegraphFloorY(wx, wz, fallBackFeetY) {
+  const sup = getSupportTopUnderFeet(wx, wz, 1.2, fallBackFeetY + 1.2);
+  if (sup !== -Infinity) return sup + 0.05;
+  if (adventureStage === "boss" && adventureBossSpawned) {
+    return ADVENTURE_BOSS_PLATFORM_FEET_Y + 0.05;
+  }
+  return 0.06;
+}
+
+/**
+ * Rebuild transparent wall colliders for closed gates. Call after `rebuildColliders`.
+ */
+function resetAdventureGateHudAnim() {
+  for (const g of adventureGateActors) {
+    g.hudShownKills = undefined;
+    g.hudStaggerNextAt = 0;
+  }
+}
+
+/** Integer kill quota displayed for one ward (each gate has its own counter). */
+function adventureTargetKillsForGate(gateIdx) {
+  const gi = gateIdx | 0;
+  const need = ADVENTURE_KILLS_PER_GATE[gi] ?? 25;
+  if (adventureGatesOpened[gi]) return need;
+  const active = Math.max(
+    0,
+    Math.min(ADVENTURE_GATE_Z.length - 1, Number(adventureActiveGateIndex) || 0)
+  );
+  if (gi < active) return need;
+  if (gi > active) return 0;
+  return Math.min(need, Math.max(0, Number(adventureSegmentKills) || 0));
+}
+
+function syncAdventureGatesAfterRebuild() {
+  disposeAdventureGateMeshes();
+  hideAllAdventureRings();
+  if (activeMapId === "adventure" && !adventureMode) {
+    for (let i = 0; i < adventureGatesOpened.length; i++) adventureGatesOpened[i] = false;
+  }
+  if (activeMapId !== "adventure") return;
+  const wallMat = new THREE.MeshPhysicalMaterial({
+    color: 0xa8cce8,
+    transparent: true,
+    opacity: 0.34,
+    roughness: 0.18,
+    metalness: 0.12,
+    emissive: 0x1a3048,
+    emissiveIntensity: 0.22,
+    depthWrite: false,
+    clearcoat: 0.5,
+    clearcoatRoughness: 0.16,
+    side: THREE.FrontSide,
+  });
+  const gw = ADVENTURE_ARENA * 2 - 2;
+  const gd = 0.6;
+  const gh = 4.45;
+  for (let i = 0; i < ADVENTURE_GATE_Z.length; i++) {
+    if (adventureGatesOpened[i]) continue;
+    const gz = ADVENTURE_GATE_Z[i];
+    const geo = new THREE.BoxGeometry(gw, gh, gd);
+    const mesh = new THREE.Mesh(geo, wallMat.clone());
+    mesh.position.set(0, gh * 0.5, gz);
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    adventureExtrasRoot.add(mesh);
+    const killCanvas = document.createElement("canvas");
+    killCanvas.width = 256;
+    killCanvas.height = 128;
+    const killCtx = killCanvas.getContext("2d");
+    const killTex = new THREE.CanvasTexture(killCanvas);
+    killTex.minFilter = THREE.LinearFilter;
+    killTex.magFilter = THREE.LinearFilter;
+    killTex.colorSpace = THREE.SRGBColorSpace;
+    const killPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(gw * 0.28, gh * 0.18),
+      new THREE.MeshBasicMaterial({
+        map: killTex,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      })
+    );
+    killPlane.position.set(0, gh * 0.1, -gd * 0.51 - 0.02);
+    killPlane.rotation.y = Math.PI;
+    mesh.add(killPlane);
+    const foot = obbXZExtents(0, gz, gw, gd, 0);
+    const yTop = gh;
+    const yBottom = 0;
+    pushVolume(foot.minX, foot.maxX, foot.minZ, foot.maxZ, yTop, yBottom);
+    const vol = levelVolumes[levelVolumes.length - 1];
+    adventureGateActors.push({
+      mesh,
+      vol,
+      gateIdx: i,
+      open: false,
+      falling: false,
+      fallY: 0,
+      killCanvas,
+      killCtx,
+      killTex,
+    });
+  }
+  rebuildNavGrid();
+  resetAdventureGateHudAnim();
+  paintAdventureGateKillHud();
+}
+
+function paintAdventureGateKillHud() {
+  const now = performance.now();
+  for (const g of adventureGateActors) {
+    if (!g.killCtx || !g.killTex || !g.killCanvas || g.open) continue;
+    const gi = g.gateIdx | 0;
+    const need = ADVENTURE_KILLS_PER_GATE[gi] ?? 25;
+    const target = adventureTargetKillsForGate(gi);
+    if (g.hudShownKills === undefined) g.hudShownKills = target;
+    if (g.hudStaggerNextAt === undefined) g.hudStaggerNextAt = 0;
+    if (target !== g.hudShownKills) {
+      if (target < g.hudShownKills) {
+        g.hudShownKills = target;
+      } else if (now >= g.hudStaggerNextAt) {
+        g.hudShownKills += 1;
+        g.hudStaggerNextAt = now + 42 + gi * 34;
+      }
+    }
+    const kills = Math.min(need, g.hudShownKills);
+    const ctx = g.killCtx;
+    const c = g.killCanvas;
+    ctx.fillStyle = "rgba(6, 10, 18, 0.9)";
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.strokeStyle = "rgba(120, 200, 255, 0.55)";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(2, 2, c.width - 4, c.height - 4);
+    const locked = gi > (Number(adventureActiveGateIndex) || 0) && !adventureGatesOpened[gi];
+    ctx.fillStyle = locked ? "rgba(160, 180, 198, 0.75)" : "#e8f4ff";
+    ctx.font = "700 52px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${kills}/${need}`, c.width * 0.5, c.height * 0.5);
+    g.killTex.needsUpdate = true;
+  }
+}
+
+function openAdventureGate(gateIdx) {
+  if (adventureGatesOpened[gateIdx]) return;
+  adventureGatesOpened[gateIdx] = true;
+  const gz = ADVENTURE_GATE_Z[gateIdx];
+  const actor = adventureGateActors.find(
+    (g) => g.mesh && !g.open && !g.falling && g.gateIdx === gateIdx
+  );
+  if (actor?.vol) {
+    const idx = levelVolumes.indexOf(actor.vol);
+    if (idx >= 0) levelVolumes.splice(idx, 1);
+    actor.open = true;
+    actor.falling = true;
+  } else {
+    for (let vi = levelVolumes.length - 1; vi >= 0; vi--) {
+      const v = levelVolumes[vi];
+      const cz = (v.minZ + v.maxZ) * 0.5;
+      if (Math.abs(cz - gz) < 0.45 && v.yTop > 3 && v.maxX - v.minX > 8) {
+        levelVolumes.splice(vi, 1);
+        break;
+      }
+    }
+  }
+  rebuildNavGrid();
+  void resumeAudio();
+  playAdventureGateOpen();
+  playAdventureCheckpointPing();
+  startAdventureAmbienceStage(Math.min(4, gateIdx + 1));
+  playAdventureStageSting(gateIdx);
+  showAdventureToast(`Barrier ${gateIdx + 1}/4 lowered.`, 2400);
+}
+
+function tickAdventureGateFall(dt) {
+  for (const g of adventureGateActors) {
+    if (!g.falling || !g.mesh) continue;
+    g.mesh.position.y -= 5.2 * dt;
+    const m = g.mesh.material;
+    if (m && !Array.isArray(m)) m.opacity = Math.max(0, (m.opacity ?? 0.22) - 0.85 * dt);
+    if (g.mesh.position.y < -2.8) {
+      g.mesh.traverse((o) => {
+        o.geometry?.dispose();
+        const mm = o.material;
+        if (mm && !Array.isArray(mm)) {
+          mm.map?.dispose?.();
+          mm.dispose();
+        }
+      });
+      adventureExtrasRoot.remove(g.mesh);
+      g.mesh = null;
+      g.falling = false;
+    }
+  }
+}
+
+let adventureSummitHazardT = 0;
+let adventureSummitHazardState = "idle";
+let adventureSummitHazardTimer = 0;
+let adventureSummitHazardX = 0;
+let adventureSummitHazardZ = 0;
+let adventureSummitHazardR = 2.6;
+let adventureSummitHazardDmg = 16;
+
+function resetAdventureSummitHazard() {
+  adventureSummitHazardT = 5.2;
+  adventureSummitHazardState = "idle";
+  adventureSummitHazardTimer = 0;
+  hideAdventureEnvHazardRing();
+}
+
+function tickAdventureSummitHazard(dt) {
+  const onSummitSeg = typeof adventureStage === "number" && adventureStage >= 3;
+  const onBossArena = adventureStage === "boss" && adventureBossSpawned;
+  if (!onSummitSeg && !onBossArena) return;
+  const bossFight = onBossArena;
+  if (bossFight) {
+    const boss = enemies.find((e) => e.isAdventureFinalBoss);
+    if (boss?.advBossState && boss.advBossState !== "chase") return;
+  }
+  const hazardIdleMul = bossFight ? 1.65 : 1;
+  const hazardWarnMul = bossFight ? 1.12 : 1;
+  adventureSummitHazardT -= dt;
+  if (adventureSummitHazardState === "idle") {
+    if (adventureSummitHazardT > 0) return;
+    adventureSummitHazardT = (7.5 + Math.random() * 2.2) * hazardIdleMul;
+    adventureSummitHazardState = "warn";
+    adventureSummitHazardTimer = 1.05 * hazardWarnMul;
+    adventureSummitHazardX = THREE.MathUtils.clamp(
+      yaw.position.x + (Math.random() - 0.5) * 12,
+      -18,
+      18
+    );
+    adventureSummitHazardZ = THREE.MathUtils.clamp(
+      yaw.position.z + (Math.random() - 0.5) * 8,
+      adventureStage === "boss" && adventureBossSpawned ? 70 : 42,
+      adventureStage === "boss" && adventureBossSpawned ? 88 : 58
+    );
+    adventureSummitHazardR = 2.35 + Math.random() * 0.45;
+    adventureSummitHazardDmg = bossFight ? 11 : 16;
+    ensureAdventureEnvHazardRing();
+    adventureEnvHazardRing.visible = true;
+    adventureEnvHazardRing.position.set(
+      adventureSummitHazardX,
+      adventureTelegraphFloorY(adventureSummitHazardX, adventureSummitHazardZ, yaw.position.y),
+      adventureSummitHazardZ
+    );
+    adventureEnvHazardRing.scale.setScalar(adventureSummitHazardR * 0.42);
+    adventureEnvHazardRingMat.opacity = 0.45;
+    void resumeAudio();
+    playAdventureBossTelegraph();
+    return;
+  }
+  if (adventureSummitHazardState === "warn") {
+    adventureSummitHazardTimer -= dt;
+    const warnLen = 1.05 * hazardWarnMul;
+    const t = THREE.MathUtils.clamp(1 - adventureSummitHazardTimer / warnLen, 0, 1);
+    adventureEnvHazardRingMat.opacity = 0.45 + t * 0.35;
+    adventureEnvHazardRing.scale.setScalar(adventureSummitHazardR * (0.42 + t * 0.52));
+    if (adventureSummitHazardTimer <= 0) {
+      adventureSummitHazardState = "hit";
+      adventureSummitHazardTimer = 0.14;
+    }
+    return;
+  }
+  if (adventureSummitHazardState === "hit") {
+    adventureSummitHazardTimer -= dt;
+    if (adventureSummitHazardTimer <= 0) {
+      const dx = yaw.position.x - adventureSummitHazardX;
+      const dz = yaw.position.z - adventureSummitHazardZ;
+      if (Math.hypot(dx, dz) < adventureSummitHazardR && damageCooldown <= 0) {
+        void resumeAudio();
+        playAdventureBossSlam();
+        playHurt();
+        health -= adventureSummitHazardDmg;
+        hurtFlash = Math.min(HURT_VIGNETTE_FLASH_MAX, hurtFlash + 0.55);
+        damageCooldown = DAMAGE_COOLDOWN * 0.85;
+        updateHealthHud();
+        addCameraShake(0.16, 0.02, 0.42);
+        if (health <= 0) endGame();
+      } else {
+        void resumeAudio();
+        playAdventureBossSlam();
+      }
+      hideAdventureEnvHazardRing();
+      adventureSummitHazardState = "idle";
+    }
+  }
+}
+
+function adventureBossPhase(enemy) {
+  const maxHp = enemy.hpMax ?? 1500;
+  const r = enemy.hp / maxHp;
+  if (r > 0.66) return 0;
+  if (r > 0.33) return 1;
+  return 2;
+}
+
+function tickAdventureFinalBoss(dt, enemy) {
+  if (!enemy?.isAdventureFinalBoss) return;
+  const phase = adventureBossPhase(enemy);
+  if (enemy.advBossReportedPhase !== phase) {
+    if (enemy.advBossReportedPhase >= 0) {
+      void resumeAudio();
+      playAdventureBossPhaseShift(phase);
+      const title = phase === 1 ? "Phase II" : phase === 2 ? "Final phase" : null;
+      if (title) showAdventureToast(`The Warden — ${title}`, 2600);
+    }
+    enemy.advBossReportedPhase = phase;
+  }
+  const cds = [4.45, 3.25, 2.35];
+  const telegraphs = [1.18, 0.98, 0.82];
+  const radii = [3.15, 3.75, 4.35];
+  const dmg = [26, 34, 44];
+  enemy.advBossCd = enemy.advBossCd ?? cds[phase];
+  enemy.advBossState = enemy.advBossState ?? "chase";
+  if (enemy.advBossState === "chase") {
+    enemy.advBossCd -= dt;
+    hideAdventureSlamRing();
+    if (enemy.advBossCd <= 0) {
+      enemy.advBossState = "warn";
+      enemy.advWarnTotal = telegraphs[phase];
+      enemy.advBossTimer = enemy.advWarnTotal;
+      enemy.advSlamR = radii[phase];
+      enemy.advSlamDmg = dmg[phase];
+      enemy.advSlamX = enemy.root.position.x;
+      enemy.advSlamZ = enemy.root.position.z;
+      ensureAdventureSlamRing();
+      adventureBossSlamRing.visible = true;
+      adventureBossSlamRing.position.set(
+        enemy.advSlamX,
+        adventureTelegraphFloorY(enemy.advSlamX, enemy.advSlamZ, enemy.baseY),
+        enemy.advSlamZ
+      );
+      adventureBossSlamRing.scale.setScalar(enemy.advSlamR * 0.38);
+      adventureBossSlamRingMat.opacity = 0.5;
+      void resumeAudio();
+      playAdventureBossTelegraph();
+    }
+    return;
+  }
+  if (enemy.advBossState === "warn") {
+    enemy.advBossTimer -= dt;
+    const denom = Math.max(0.05, enemy.advWarnTotal ?? telegraphs[phase]);
+    const t = 1 - THREE.MathUtils.clamp(enemy.advBossTimer / denom, 0, 1);
+    adventureBossSlamRingMat.opacity = 0.5 + t * 0.4;
+    adventureBossSlamRing.scale.setScalar(enemy.advSlamR * (0.38 + t * 0.55));
+    if (enemy.advBossTimer <= 0) {
+      enemy.advBossState = "resolve";
+      enemy.advBossTimer = 0.11;
+    }
+    return;
+  }
+  if (enemy.advBossState === "resolve") {
+    enemy.advBossTimer -= dt;
+    if (enemy.advBossTimer <= 0) {
+      const dx = yaw.position.x - enemy.advSlamX;
+      const dz = yaw.position.z - enemy.advSlamZ;
+      if (Math.hypot(dx, dz) < enemy.advSlamR && damageCooldown <= 0) {
+        void resumeAudio();
+        playAdventureBossSlam();
+        playHurt();
+        health -= enemy.advSlamDmg;
+        hurtFlash = Math.min(HURT_VIGNETTE_FLASH_MAX, hurtFlash + 0.62);
+        damageCooldown = DAMAGE_COOLDOWN * 0.92;
+        updateHealthHud();
+        addCameraShake(0.2, 0.028, 0.5);
+        if (health <= 0) endGame();
+      } else {
+        void resumeAudio();
+        playAdventureBossSlam();
+      }
+      hideAdventureSlamRing();
+      enemy.knightShieldBlockChance = phase === 0 ? 0.42 : phase === 1 ? 0.32 : 0.24;
+      enemy.advBossState = "chase";
+      enemy.advBossCd = cds[phase] * (0.88 + Math.random() * 0.22);
+    }
+  }
+}
+
+function spawnAdventureFinalBoss() {
+  if (practiceMode || mpDmActive() || adventureBossSpawned) return;
+  clearAllLiveEnemies();
+  resetAdventureSummitHazard();
+  const built = buildKnightBoss();
+  const { root, mats, matBases } = built;
+  root.scale.setScalar(2.05);
+  root.position.set(0, 6, ADVENTURE_BOSS_ARENA_Z);
+  scene.add(root);
+  const rad = ENEMY_COLLIDE_RADIUS * 1.9;
+  const snap = snapFeetToSupport(0, ADVENTURE_BOSS_ARENA_Z, rad, ADVENTURE_BOSS_PLATFORM_FEET_Y + 2, 0);
+  const enemy = {
+    root,
+    hp: 1500,
+    hpMax: 1500,
+    speedMul: 0.58,
+    damage: 72,
+    knightShieldBlockChance: 0.42,
+    collideRadius: rad,
+    meleeAimY: 1.46,
+    meleeReach: 0.28,
+    canJump: false,
+    bobAmp: 0.03,
+    ammoDropTier: 3,
+    phase: Math.random() * Math.PI * 2,
+    isMapBoss: true,
+    isAdventureEnemy: true,
+    isAdventureFinalBoss: true,
+    mats,
+    matBases,
+    flash: 0,
+    velY: 0,
+    baseY: snap.y,
+    jumpCd: 0,
+    kx: 0,
+    kz: 0,
+    aiDirX: 0,
+    aiDirZ: 1,
+    advBossCd: 3.1,
+    advBossState: "chase",
+    advBossTimer: 0,
+    advBossReportedPhase: -1,
+  };
+  root.userData.enemy = enemy;
+  root.position.set(0, enemy.baseY, ADVENTURE_BOSS_ARENA_Z);
+  enemies.push(enemy);
+  ensureBossHealthBar(enemy);
+  adventureBossSpawned = true;
+  startAdventureAmbienceStage(4);
+  showAdventureToast("Summit boss: The Warden — watch the blazing ring.", 3400);
+}
+
+function beginAdventureRun() {
+  adventureMode = true;
+  adventureStage = 0;
+  adventureActiveGateIndex = 0;
+  adventureSegmentKills = 0;
+  adventureSpawnTimer = 0.2;
+  adventureBossSpawned = false;
+  for (let i = 0; i < adventureGatesOpened.length; i++) adventureGatesOpened[i] = false;
+  adventureLives = ADVENTURE_LIVES_MAX;
+  disposeAdventureGateMeshes();
+  hideAllAdventureRings();
+  resetAdventureSummitHazard();
+  if (activeMapId === "adventure") {
+    syncAdventureGatesAfterRebuild();
+  }
+  syncAdventureCheckpointToStart();
+  updateLevelHud();
+  void resumeAudio();
+  startAdventureAmbienceStage(0);
+  showAdventureToast(
+    "Reach the mesa: each barrier shows kills toward 25 (last ward 40). Clear hostiles to open it.",
+    3800
+  );
+}
+
+function updateAdventureMode(dt) {
+  if (!adventureMode || !playing || health <= 0 || practiceMode || mpDmActive()) return;
+  paintAdventureGateKillHud();
+  tickAdventureGateFall(dt);
+  if (adventureStage === "boss") {
+    const boss = enemies.find((e) => e.isAdventureFinalBoss);
+    if (boss) tickAdventureFinalBoss(dt, boss);
+    tickAdventureSummitHazard(dt);
+    return;
+  }
+  if (adventureStage === "done") return;
+  const seg =
+    typeof adventureStage === "number"
+      ? adventureStage
+      : Math.min(3, adventureActiveGateIndex);
+  if (seg >= 3) tickAdventureSummitHazard(dt);
+  adventureSpawnTimer -= dt;
+  const cap = ADVENTURE_CAP_PER_SEGMENT[seg] ?? 8;
+  if (adventureSpawnTimer <= 0 && enemies.length < cap) {
+    const picks = ADVENTURE_SEGMENT_SPAWNS[seg] ?? ADVENTURE_SEGMENT_SPAWNS[0];
+    const pick = picks[Math.floor(Math.random() * picks.length)];
+    const muls = [
+      [1.08, 1.04, 1.05],
+      [1.12, 1.06, 1.08],
+      [1.18, 1.08, 1.12],
+      [1.28, 1.12, 1.22],
+    ];
+    const m = muls[seg] ?? muls[0];
+    spawnEnemyNear(pick[0], pick[1], true, m[0], m[1], m[2]);
+    adventureSpawnTimer =
+      ADVENTURE_SPAWN_INTERVAL[seg] * (0.85 + Math.random() * 0.2);
+  }
+  const need = ADVENTURE_KILLS_PER_GATE[adventureActiveGateIndex] ?? 25;
+  if (
+    adventureSegmentKills >= need &&
+    adventureActiveGateIndex < ADVENTURE_GATE_Z.length
+  ) {
+    openAdventureGate(adventureActiveGateIndex);
+    adventureSegmentKills = 0;
+    adventureActiveGateIndex++;
+    if (adventureActiveGateIndex >= ADVENTURE_GATE_Z.length) {
+      adventureStage = "boss";
+      updateLevelHud();
+      spawnAdventureFinalBoss();
+    } else {
+      adventureStage = adventureActiveGateIndex;
+      adventureSpawnTimer = 0.15;
+      updateLevelHud();
+    }
+  }
+}
+
+function onAdventureEnemyKilled(enemy) {
+  if (!adventureMode || !enemy?.isAdventureEnemy) return;
+  if (adventureStage === "boss" && enemy.isAdventureFinalBoss) {
+    adventureStage = "done";
+    hideAllAdventureRings();
+    stopAdventureAmbience();
+    updateLevelHud();
+    showAdventureToast("Adventure clear! You conquered the summit.", 4200);
+    return;
+  }
+  if (adventureStage === "done" || adventureStage === "boss") return;
+  if (adventureActiveGateIndex < ADVENTURE_GATE_Z.length) {
+    adventureSegmentKills++;
+    paintAdventureGateKillHud();
+    updateLevelHud();
   }
 }
 
@@ -1051,6 +1785,33 @@ function resetKillChain() {
 
 function updateLevelHud() {
   if (!levelEl) return;
+  if (adventureMode) {
+    if (adventureStage === "done") {
+      levelEl.textContent = "Adventure Complete";
+      return;
+    }
+    if (adventureStage === "boss") {
+      levelEl.textContent =
+        "Adventure: Boss — red: Warden slam · cyan: floor hazard · lives " +
+        adventureLives;
+      return;
+    }
+    if (typeof adventureStage === "number") {
+      const need = ADVENTURE_KILLS_PER_GATE[adventureActiveGateIndex] ?? 25;
+      const zone =
+        adventureStage === 0
+          ? "Trail"
+          : adventureStage === 1
+            ? "Approach"
+            : adventureStage === 2
+              ? "Climb"
+              : "Summit";
+      const hazard =
+        adventureStage >= 3 && !adventureBossSpawned ? " · floor hazards" : "";
+      levelEl.textContent = `Adventure: ${zone} ${adventureSegmentKills}/${need}${hazard} · lives ${adventureLives}`;
+      return;
+    }
+  }
   if (mpDmActive() || practiceMode) {
     levelEl.textContent = "";
     return;
@@ -1059,7 +1820,7 @@ function updateLevelHud() {
 }
 
 function advanceGameLevelOnKill() {
-  if (practiceMode || mpDmActive()) return;
+  if (practiceMode || mpDmActive() || adventureMode) return;
   killsInCurrentLevel++;
   if (killsInCurrentLevel < KILLS_PER_LEVEL) {
     updateLevelHud();
@@ -1074,9 +1835,24 @@ function advanceGameLevelOnKill() {
   }
 }
 
-function awardEnemyKillScore() {
+function addGameLevels(amount) {
+  if (practiceMode || mpDmActive()) return;
+  const gain = Math.max(0, Math.floor(amount));
+  if (gain <= 0) return;
+  gameLevel += gain;
+  killsInCurrentLevel = 0;
+  updateLevelHud();
+  const milestone = Math.floor(gameLevel / 10) * 10;
+  if (milestone > 0 && milestone !== lastLevelBossMilestone) {
+    lastLevelBossMilestone = milestone;
+    spawnMapBossEnemy();
+  }
+}
+
+function awardEnemyKillScore(enemy = null) {
   score += scoreForKill();
   if (scoreEl && !mpDmActive()) scoreEl.textContent = `Score: ${score}`;
+  if (enemy) onAdventureEnemyKilled(enemy);
   advanceGameLevelOnKill();
 }
 
@@ -1259,6 +2035,7 @@ const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
 const tmpDmgProj = new THREE.Vector3();
 const tmpEyeWorld = new THREE.Vector3();
+const tmpSnakeHeadWorld = new THREE.Vector3();
 const tmpTracerDir = new THREE.Vector3();
 const tmpShotPelletDir = new THREE.Vector3();
 const tracerYAxis = new THREE.Vector3(0, 1, 0);
@@ -1407,8 +2184,8 @@ skyDome.renderOrder = -999;
 skyFollowGroup.add(skyDome);
 
 const sunDisc = new THREE.Mesh(
-  new THREE.SphereGeometry(2.8, 14, 14),
-  new THREE.MeshBasicMaterial({ color: 0xfff8e8, fog: false })
+  new THREE.SphereGeometry(2.8, 16, 14),
+  new THREE.MeshBasicMaterial({ color: 0xfff4e0, fog: false })
 );
 sunDisc.position.copy(sun.position).normalize().multiplyScalar(118);
 skyFollowGroup.add(sunDisc);
@@ -2200,6 +2977,9 @@ const BEAR_EAR_GEO = new THREE.SphereGeometry(0.07, 8, 6);
 
 const obstaclesRoot = new THREE.Group();
 levelRoot.add(obstaclesRoot);
+/** Transparent kill-gates + boss telegraph ring (adventure only). */
+const adventureExtrasRoot = new THREE.Group();
+levelRoot.add(adventureExtrasRoot);
 
 const crateSurf = createWoodCrateTextures();
 const concSurf = createConcreteTextures();
@@ -2382,10 +3162,11 @@ function worldToNavCell(x, z) {
 }
 
 function rebuildNavGrid() {
-  navMinX = -ARENA + 0.9;
-  navMinZ = -ARENA + 0.9;
-  const navMaxX = ARENA - 0.9;
-  const navMaxZ = ARENA - 0.9;
+  const ext = activeMapId === "adventure" ? ADVENTURE_ARENA : ARENA;
+  navMinX = -ext + 0.9;
+  navMinZ = -ext + 0.9;
+  const navMaxX = ext - 0.9;
+  const navMaxZ = ext - 0.9;
   navCols = Math.max(1, Math.floor((navMaxX - navMinX) / NAV_CELL_SIZE));
   navRows = Math.max(1, Math.floor((navMaxZ - navMinZ) / NAV_CELL_SIZE));
   navBlocked = new Uint8Array(navCols * navRows);
@@ -2658,7 +3439,8 @@ function getTrampolineUnderFeet(px, pz, radius, feetY) {
 
 function resolveEntityXZ(x, z, radius, feetY, opts) {
   const noTopBandSkip = opts?.noTopBandSkip === true;
-  const passes = noTopBandSkip ? 14 : 10;
+  const extraPasses = opts?.extraPasses ?? 0;
+  const passes = (noTopBandSkip ? 14 : 10) + extraPasses;
   let ox = x;
   let oz = z;
   for (let pass = 0; pass < passes; pass++) {
@@ -2668,7 +3450,13 @@ function resolveEntityXZ(x, z, radius, feetY, opts) {
       const onTopBand =
         feetY >= box.yTop - COLLIDE_ON_TOP_BAND_BELOW &&
         feetY <= box.yTop + COLLIDE_ON_TOP_BAND_ABOVE;
-      if (!noTopBandSkip && onTopBand) continue;
+      const volH = box.yTop - (box.yBottom ?? 0);
+      const skipWalkwayTop =
+        !noTopBandSkip &&
+        onTopBand &&
+        (opts?.forPlayer === true ||
+          volH <= COLLIDE_TOP_BAND_WALKABLE_MAX_HEIGHT);
+      if (skipWalkwayTop) continue;
       const qx = THREE.MathUtils.clamp(ox, box.minX, box.maxX);
       const qz = THREE.MathUtils.clamp(oz, box.minZ, box.maxZ);
       const dx = ox - qx;
@@ -2697,7 +3485,9 @@ function resolveEntityXZ(x, z, radius, feetY, opts) {
 }
 
 function resolvePlayerColliders() {
-  const r = resolveEntityXZ(yaw.position.x, yaw.position.z, PLAYER_RADIUS, yaw.position.y);
+  const r = resolveEntityXZ(yaw.position.x, yaw.position.z, PLAYER_RADIUS, yaw.position.y, {
+    forPlayer: true,
+  });
   yaw.position.x = r.x;
   yaw.position.z = r.z;
 }
@@ -3003,6 +3793,173 @@ const MAP_PRESETS = {
       { x: 2, z: -4, w: 1.4, h: 0.32, d: 1.4, mat: "crate", ry: 0.55 },
     ],
   },
+  adventure: {
+    sunMul: 1.06,
+    hemiMul: 1.08,
+    ambMul: 1.03,
+    fillMul: 1.14,
+    bg: 0x524842,
+    fogColor: 0x95877a,
+    fogNear: 20,
+    fogFar: 224,
+    floorGrid: 0.88,
+    floor: 0x7a8f9c,
+    brick: 0x8899a6,
+    pillar: 0xd8e6f2,
+    obstacleTints: {
+      crate: 0xede4d8,
+      concrete: 0xccd8e4,
+      barrier: 0xb4c4d4,
+      rail: 0xd2dde8,
+      stripe: 0xf2ebe2,
+    },
+    pillars: [
+      [-38, -40],
+      [38, -40],
+      [-40, 36],
+      [40, 36],
+      [-34, 8],
+      [34, 8],
+      [-26, 28],
+      [26, 30],
+    ],
+    blocks() {
+      const h01 = (n) => {
+        const n2 = n * n;
+        const f = (Math.sin(n2 * 12.9898) * 43758.5453) % 1;
+        return f < 0 ? f + 1 : f;
+      };
+      const trail = Array.from({ length: 52 }, (_, i) => {
+        const z = -33.5 + i * 1.72;
+        return {
+          x: 0,
+          z,
+          w: 3.6,
+          h: 0.12,
+          d: 1.22,
+          mat: "stripe",
+          ry: (i * 0.029) % 0.18,
+        };
+      });
+      const valley = [];
+      for (let i = 0; i < 44; i++) {
+        const side = i % 2 === 0 ? -1 : 1;
+        const z = -30 + (i / 43) * 72;
+        const xOff =
+          side * (13.5 + h01(i + 0.15) * 11 + Math.sin(i * 0.37) * 4.2);
+        if (Math.abs(xOff) < 10.5) continue;
+        const h = 0.32 + h01(i + 2.2) * 1.35;
+        const w = 2.8 + h01(i + 4.1) * 5.2;
+        const d = 2.1 + h01(i + 6.3) * 3.4;
+        valley.push({
+          x: xOff,
+          z: z + (h01(i + 1.7) - 0.5) * 3.2,
+          y: h * 0.5 + 0.04,
+          w,
+          h,
+          d,
+          mat: h01(i + 9.9) > 0.48 ? "concrete" : "barrier",
+          ry: (h01(i + 8.4) - 0.5) * 0.42,
+        });
+      }
+      const z0 = 45.35;
+      const z1 = 74.1;
+      const yTop0 = 4.55;
+      const yTop1 = 14.68;
+      const mountain = [];
+      const spines = [-6.2, 0, 6.2];
+      const nSp = 34;
+      for (let s = 0; s < spines.length; s++) {
+        const xBase = spines[s];
+        for (let i = 0; i < nSp; i++) {
+          const t = nSp <= 1 ? 0 : i / (nSp - 1);
+          const u = t + (s - 1) * 0.055;
+          const z =
+            z0 +
+            THREE.MathUtils.clamp(u, 0, 1) * (z1 - z0) +
+            Math.sin(t * Math.PI * 2.05 + s * 1.31) * 1.45;
+          const yTop =
+            yTop0 +
+            Math.pow(t, 1.05) * (yTop1 - yTop0) +
+            Math.sin(i * 0.42 + s * 2.1) * 0.26;
+          const taper = 1 - Math.pow(t, 0.78);
+          const w = 5.8 + taper * 11.5 + (s === 1 ? 1.4 : 0);
+          const h = 0.26 + h01(i * 0.13 + s * 4.7) * 0.12;
+          const d = 3.8 + taper * 3.1;
+          const x =
+            xBase +
+            Math.sin(t * 4.2 + s * 0.9) * 2.95 +
+            Math.cos(i * 0.21) * 1.05;
+          mountain.push({
+            x,
+            z,
+            y: yTop - h * 0.5,
+            w,
+            h,
+            d,
+            mat:
+              t > 0.76
+                ? "stripe"
+                : t > 0.35
+                  ? "concrete"
+                  : h01(i + s * 3.1) > 0.4
+                    ? "barrier"
+                    : "concrete",
+            ry: (h01(i * 0.31 + s * 2.4) - 0.5) * 0.072,
+          });
+        }
+      }
+      for (let r = 0; r < 11; r++) {
+        const t = (r + 0.5) / 11;
+        const z = z0 + t * (z1 - z0);
+        const yTop = yTop0 + Math.pow(t, 1.08) * (yTop1 - yTop0) + 0.12;
+        const h = 0.3;
+        const w = 20 + (1 - t) * 12;
+        mountain.push({
+          x: Math.sin(r * 0.95) * 1.8,
+          z,
+          y: yTop - h * 0.5,
+          w,
+          h,
+          d: 3.5 + h01(r + 20) * 1.2,
+          mat: r % 2 === 0 ? "barrier" : "concrete",
+          ry: (h01(r + 3) - 0.5) * 0.08,
+        });
+      }
+      return [
+        ...trail,
+        ...valley,
+        { x: -15.5, z: 10, w: 0.58, h: 1.65, d: 62, mat: "rail", ry: 0.05 },
+        { x: 15.5, z: 10, w: 0.58, h: 1.65, d: 62, mat: "rail", ry: -0.05 },
+        { x: 0, z: 22.4, y: 0.72, w: 4.6, h: 0.42, d: 1.45, mat: "concrete", ry: 0 },
+        { x: 0, z: 24.8, y: 1.1, w: 4.6, h: 0.42, d: 1.45, mat: "concrete", ry: 0 },
+        { x: 0, z: 27.1, y: 1.52, w: 4.6, h: 0.42, d: 1.45, mat: "concrete", ry: 0 },
+        { x: 0, z: 29.6, y: 1.96, w: 4.65, h: 0.42, d: 1.48, mat: "stripe", ry: 0 },
+        { x: 0, z: 32.3, y: 2.4, w: 4.7, h: 0.44, d: 1.5, mat: "concrete", ry: 0 },
+        { x: 0, z: 35.2, y: 2.9, w: 4.75, h: 0.44, d: 1.52, mat: "stripe", ry: 0 },
+        { x: 0, z: 38.3, y: 3.38, w: 4.75, h: 0.45, d: 1.55, mat: "concrete", ry: 0 },
+        { x: 0, z: 41.6, y: 3.9, w: 4.8, h: 0.46, d: 1.58, mat: "stripe", ry: 0 },
+        { x: 0, z: 44.2, y: 4.35, w: 5.1, h: 0.44, d: 2, mat: "concrete", ry: 0 },
+        ...mountain,
+        {
+          x: 0,
+          z: ADVENTURE_BOSS_ARENA_Z,
+          y: ADVENTURE_BOSS_PLATFORM_FEET_Y - 0.275,
+          w: 34,
+          h: 0.55,
+          d: 30,
+          mat: "stripe",
+          ry: 0,
+        },
+        { x: -18, z: 94, y: 4.4, w: 36, h: 6.5, d: 18, mat: "barrier", ry: 0.06 },
+        { x: 17, z: 97, y: 4.85, w: 34, h: 7.2, d: 16, mat: "concrete", ry: -0.055 },
+        ...crateStack(-22, -18, 2, 0.06),
+        ...crateStack(21.5, -17, 2, -0.08),
+        { x: -6, z: 8, w: 2.9, h: 0.42, d: 2, mat: "crate", ry: 0.2 },
+        { x: 7, z: 9, w: 3.1, h: 0.44, d: 1.9, mat: "crate", ry: -0.18 },
+      ];
+    },
+  },
   practice2_obby: {
     sunMul: 1.1,
     hemiMul: 1.06,
@@ -3214,6 +4171,80 @@ const MAP_PRESETS = {
 
 let activeMapId = "courtyard";
 
+/** Non-forest maps: reset lighting / post / shadows after Adventure polish. */
+function restoreStandardArenaPresentation(p, mapId) {
+  hemi.color.setHex(0xa8c0e8);
+  hemi.groundColor.setHex(0xd8e0ec);
+  ambientLight.color.setHex(0xb4c6dc);
+  sun.color.setHex(0xfff6f0);
+  sun.position.set(-14, 38, 18);
+  fill.color.setHex(0xc8dcff);
+  fill.position.set(20, 18, -22);
+  fill.intensity = 0.1 * (p.fillMul ?? 1);
+  sun.shadow.mapSize.setScalar(2048);
+  sun.shadow.camera.left = -40;
+  sun.shadow.camera.right = 40;
+  sun.shadow.camera.top = 40;
+  sun.shadow.camera.bottom = -40;
+  sun.shadow.camera.far = 90;
+  sun.shadow.bias = -0.0002;
+  renderer.toneMappingExposure = 0.63;
+  bloomPass.strength = 0.175;
+  bloomPass.radius = 0.28;
+  bloomPass.threshold = 0.58;
+  if (mapId === "forest") return;
+  floorBaseMat.roughness = 1;
+  floorBaseMat.emissive.setHex(0x151a22);
+  floorBaseMat.emissiveIntensity = 0.025;
+  pillarMat.roughness = 1;
+  pillarMat.metalness = 0;
+  obstacleMats.stripe.emissiveIntensity = 0.05;
+  obstacleMats.concrete.metalness = 0;
+  obstacleMats.concrete.roughness = 1;
+  obstacleMats.barrier.metalness = 0;
+  obstacleMats.barrier.roughness = 1;
+  obstacleMats.rail.metalness = 0;
+  obstacleMats.rail.roughness = 1;
+  obstacleMats.crate.metalness = 0;
+  obstacleMats.crate.roughness = 1;
+}
+
+function applyAdventurePresentation(p) {
+  hemi.color.setHex(0xaebfd8);
+  hemi.groundColor.setHex(0xc8ae9c);
+  ambientLight.color.setHex(0xc6c2d6);
+  sun.color.setHex(0xfff2e6);
+  sun.position.set(-21, 48, 26);
+  fill.color.setHex(0xd8e6ff);
+  fill.position.set(28, 22, -36);
+  fill.intensity = 0.13 * (p.fillMul ?? 1);
+  sun.shadow.mapSize.setScalar(3072);
+  sun.shadow.camera.left = -58;
+  sun.shadow.camera.right = 58;
+  sun.shadow.camera.top = 58;
+  sun.shadow.camera.bottom = -58;
+  sun.shadow.camera.far = 138;
+  sun.shadow.bias = -0.00028;
+  renderer.toneMappingExposure = 0.71;
+  bloomPass.strength = 0.118;
+  bloomPass.radius = 0.36;
+  bloomPass.threshold = 0.52;
+  floorBaseMat.roughness = 0.9;
+  floorBaseMat.emissive.setHex(0x161c22);
+  floorBaseMat.emissiveIntensity = 0.036;
+  pillarMat.roughness = 0.84;
+  pillarMat.metalness = 0.07;
+  obstacleMats.stripe.emissiveIntensity = 0.082;
+  obstacleMats.concrete.metalness = 0.055;
+  obstacleMats.concrete.roughness = 0.88;
+  obstacleMats.barrier.metalness = 0.11;
+  obstacleMats.barrier.roughness = 0.8;
+  obstacleMats.rail.metalness = 0.2;
+  obstacleMats.rail.roughness = 0.65;
+  obstacleMats.crate.metalness = 0;
+  obstacleMats.crate.roughness = 0.95;
+}
+
 function rebuildLevel(mapId) {
   const p = MAP_PRESETS[mapId];
   if (!p) return;
@@ -3266,7 +4297,15 @@ function rebuildLevel(mapId) {
     pillarMat.metalness = 0;
   }
 
-  const fg = (p.floorGrid ?? 1) * ARENA * 2;
+  const advMap = mapId === "adventure";
+  if (advMap) applyAdventurePresentation(p);
+  else restoreStandardArenaPresentation(p, mapId);
+
+  const floorSpan = advMap ? ADVENTURE_ARENA * 2 + 12 : ARENA * 2;
+  floor.geometry.dispose();
+  floor.geometry = new THREE.PlaneGeometry(floorSpan, floorSpan, advMap ? 72 : 48, advMap ? 72 : 48);
+
+  const fg = (p.floorGrid ?? 1) * (advMap ? ADVENTURE_ARENA * 2 : ARENA * 2);
   floorGridMap.repeat.set(fg, fg);
 
   while (pillarsRoot.children.length) pillarsRoot.remove(pillarsRoot.children[0]);
@@ -3287,13 +4326,27 @@ function rebuildLevel(mapId) {
 
   rebuildObstacles(p);
   rebuildColliders(p);
+  syncAdventureGatesAfterRebuild();
   const isPractice2Obby = mapId === "practice2_obby";
   floor.visible = !isPractice2Obby;
-  wallBricks.visible = !isPractice2Obby;
+  wallBricks.visible = !isPractice2Obby && mapId !== "adventure";
+
+  if (skyShaderMaterial) {
+    tmpV.copy(sun.position).normalize();
+    skyShaderMaterial.uniforms.uSunDir.value.copy(tmpV);
+  }
+  sunDisc.position.copy(sun.position).normalize().multiplyScalar(118);
 }
 
 const mapSelectEl = document.getElementById("map-select");
 const mapBlurbEl = document.getElementById("map-blurb");
+
+if (mapSelectEl && !mapSelectEl.querySelector('option[value="adventure"]')) {
+  const opt = document.createElement("option");
+  opt.value = "adventure";
+  opt.textContent = "Adventure";
+  mapSelectEl.appendChild(opt);
+}
 
 function rebuildLevelForCurrentPracticeState() {
   if (practiceMode2 && MAP_PRESETS.practice2_obby) rebuildLevel("practice2_obby");
@@ -3312,6 +4365,8 @@ const MAP_BLURBS = {
     "Maze playground: long alternating corridors, dead-ends, and trampoline escape pockets.",
   forest:
     "Wild woods — fast wolves (50 HP, fierce bites) and rare heavy bears (150 HP, slow but brutal). No human hostiles.",
+  adventure:
+    "One map: follow the striped path toward the peaks. Four wards block you until you clear enough hostiles; the last opens the boss arena on the summit.",
 };
 
 function updateMapBlurb() {
@@ -3396,6 +4451,7 @@ mapSelectEl?.addEventListener("change", () => {
   if (readPracticeReactionMode() && MAP_PRESETS.practice2_obby) rebuildLevel("practice2_obby");
   else if (MAP_PRESETS[v]) rebuildLevel(v);
   updateMapBlurb();
+  syncMenuObjectiveForPractice();
 });
 
 if (readPracticeReactionMode() && MAP_PRESETS.practice2_obby) rebuildLevel("practice2_obby");
@@ -3661,6 +4717,47 @@ utilityKitGroup.add(utilitySilverFanGroup);
   utilitySilverFanGroup.add(root);
 })();
 
+/** Olive fatigue fabric for first-person sleeves (procedural weave). */
+function createCombatSleeveTextures() {
+  const res = 128;
+  const c = document.createElement("canvas");
+  const r = document.createElement("canvas");
+  c.width = c.height = res;
+  r.width = r.height = res;
+  const g = c.getContext("2d");
+  const gr = r.getContext("2d");
+  const img = g.createImageData(res, res);
+  const imgr = gr.createImageData(res, res);
+  const d = img.data;
+  const dr = imgr.data;
+  for (let y = 0; y < res; y++) {
+    for (let x = 0; x < res; x++) {
+      const n = fbmTile(x * 0.92, y * 0.92, res);
+      const weave =
+        Math.sin(x * 0.42 + y * 0.08) * Math.sin(y * 0.38 - x * 0.06) * 0.5 + 0.5;
+      const R = THREE.MathUtils.clamp(52 + n * 30 + weave * 16, 0, 255);
+      const G = THREE.MathUtils.clamp(64 + n * 34 + weave * 18, 0, 255);
+      const B = THREE.MathUtils.clamp(48 + n * 24 + weave * 12, 0, 255);
+      const rough = 0.86 + n * 0.11;
+      const i = (y * res + x) * 4;
+      d[i] = R;
+      d[i + 1] = G;
+      d[i + 2] = B;
+      d[i + 3] = 255;
+      const rv = rough * 255;
+      dr[i] = dr[i + 1] = dr[i + 2] = rv;
+      dr[i + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  gr.putImageData(imgr, 0, 0);
+  const map = new THREE.CanvasTexture(c);
+  const roughnessMap = new THREE.CanvasTexture(r);
+  finishRepeatTexture(map, 3, 3, true);
+  finishRepeatTexture(roughnessMap, 3, 3, false);
+  return { map, roughnessMap };
+}
+
 function createLeatherGloveHandTextures() {
   const res = 128;
   const c = document.createElement("canvas");
@@ -3767,6 +4864,7 @@ function createBrassKnuckleFistHandTextures() {
 
 const gloveHandTex = createLeatherGloveHandTextures();
 const knuckleFistTex = createBrassKnuckleFistHandTextures();
+const combatSleeveTex = createCombatSleeveTextures();
 const gloveHandMat = new THREE.MeshStandardMaterial({
   color: 0xffffff,
   map: gloveHandTex.map,
@@ -3781,7 +4879,6 @@ const knuckleFistHandMat = new THREE.MeshStandardMaterial({
   roughness: 1,
   metalness: 0.06,
 });
-
 const VIEWMODEL_HAND_GEO = new THREE.BoxGeometry(0.14, 0.1, 0.22);
 const viewmodelPrimaryHandMeshes = [];
 
@@ -4646,49 +5743,106 @@ function buildEnemy() {
   attachTriplanarToStandardMat(egBodyMat, 0.92);
   attachTriplanarToStandardMat(egDarkMat, 0.86);
 
-  function limbBox(w, h, d, mat, x, y, z, hitZone) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-    m.position.set(x, y, z);
-    if (hitZone) m.userData.hitZone = hitZone;
-    m.castShadow = true;
-    root.add(m);
-    return m;
+  const sleeveMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    map: combatSleeveTex.map,
+    roughnessMap: combatSleeveTex.roughnessMap,
+    roughness: 1,
+    metalness: 0,
+    emissive: 0x1a2018,
+    emissiveIntensity: 0.04,
+  });
+  registerMat(sleeveMat, 0x1a2018, 0.04);
+  attachTriplanarToStandardMat(sleeveMat, 0.72);
+
+  function pushMesh(mesh, hitZone) {
+    if (hitZone) mesh.userData.hitZone = hitZone;
+    mesh.castShadow = true;
+    root.add(mesh);
+    return mesh;
   }
 
-  limbBox(0.2, 0.48, 0.22, armorMat, -0.11, 0.24, 0);
-  limbBox(0.2, 0.48, 0.22, armorMat, 0.11, 0.24, 0);
-  limbBox(0.36, 0.592, 0.28, suitMat, 0, 0.772, 0);
+  function legCapsule(x, z) {
+    const r = 0.091;
+    const straight = 0.3;
+    const m = new THREE.Mesh(new THREE.CapsuleGeometry(r, straight, 4, 12), armorMat);
+    m.position.set(x, r + straight * 0.5, z);
+    pushMesh(m);
+  }
+  legCapsule(-0.11, 0);
+  legCapsule(0.11, 0);
 
-  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.34, 0.11), armorMat);
-  pack.position.set(0, 0.8, -0.19);
-  pack.castShadow = true;
-  root.add(pack);
+  const torso = new THREE.Mesh(
+    new RoundedBoxGeometry(0.34, 0.58, 0.27, 3, 0.052),
+    suitMat
+  );
+  torso.position.set(0, 0.77, 0);
+  pushMesh(torso);
+
+  const belt = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.034, 6, 18), armorMat);
+  belt.rotation.x = Math.PI / 2;
+  belt.position.set(0, 0.49, 0);
+  pushMesh(belt);
+
+  const hip = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.15, 0.168, 0.14, 10),
+    armorMat
+  );
+  hip.rotation.z = Math.PI / 2;
+  hip.position.set(0, 0.515, 0);
+  pushMesh(hip);
+
+  const pack = new THREE.Mesh(
+    new RoundedBoxGeometry(0.195, 0.32, 0.105, 2, 0.026),
+    armorMat
+  );
+  pack.position.set(0, 0.84, -0.2);
+  pushMesh(pack);
+
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.096, 0.118, 0.2, 10), suitMat);
+  neck.position.set(0, 1.18, 0);
+  pushMesh(neck);
 
   const headGroup = new THREE.Group();
   headGroup.position.set(0, 1.35, 0);
-  const skull = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.42, 0.26), suitMat);
+  const skull = new THREE.Mesh(new THREE.SphereGeometry(0.132, 14, 12), suitMat);
+  skull.scale.set(1.04, 1.2, 1.08);
   skull.userData.hitZone = "head";
   skull.castShadow = true;
   headGroup.add(skull);
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.058, 0.13), visorMat);
-  visor.position.set(0, 0.025, 0.165);
+  const visor = new THREE.Mesh(new THREE.SphereGeometry(0.115, 12, 10), visorMat);
+  visor.scale.set(1.08, 0.34, 0.68);
+  visor.position.set(0, 0.028, 0.142);
   visor.userData.hitZone = "head";
   visor.castShadow = true;
   headGroup.add(visor);
   root.add(headGroup);
 
-  limbBox(0.13, 0.58, 0.16, armorMat, -0.228, 0.88, 0.08);
-  limbBox(0.13, 0.58, 0.16, armorMat, 0.228, 0.88, 0.08);
+  function arm(side) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.57, 0.16), sleeveMat);
+    m.position.set(side * 0.226, 0.885, 0.065);
+    m.rotation.z = side * 0.11;
+    m.rotation.x = 0.14;
+    pushMesh(m);
+  }
+  arm(-1);
+  arm(1);
 
   const gunGrp = new THREE.Group();
   gunGrp.position.set(0.3, 0.72, 0.26);
   gunGrp.rotation.y = -0.2;
 
-  const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.095, 0.13, 0.36), egBodyMat);
+  const receiver = new THREE.Mesh(
+    new RoundedBoxGeometry(0.096, 0.13, 0.36, 2, 0.018),
+    egBodyMat
+  );
   receiver.castShadow = true;
   gunGrp.add(receiver);
 
-  const handguard = new THREE.Mesh(new THREE.BoxGeometry(0.084, 0.102, 0.228), egDarkMat);
+  const handguard = new THREE.Mesh(
+    new RoundedBoxGeometry(0.085, 0.1, 0.23, 2, 0.016),
+    egDarkMat
+  );
   handguard.position.set(0, -0.03, -0.236);
   handguard.castShadow = true;
   gunGrp.add(handguard);
@@ -4702,12 +5856,15 @@ function buildEnemy() {
   egBarrel.castShadow = true;
   gunGrp.add(egBarrel);
 
-  const egMag = new THREE.Mesh(new THREE.BoxGeometry(0.046, 0.22, 0.072), egDarkMat);
+  const egMag = new THREE.Mesh(new RoundedBoxGeometry(0.047, 0.21, 0.072, 2, 0.012), egDarkMat);
   egMag.position.set(0, -0.12, 0.02);
   egMag.castShadow = true;
   gunGrp.add(egMag);
 
-  const stockPad = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.1, 0.14), egDarkMat);
+  const stockPad = new THREE.Mesh(
+    new RoundedBoxGeometry(0.061, 0.098, 0.14, 2, 0.014),
+    egDarkMat
+  );
   stockPad.position.set(0, -0.02, 0.24);
   stockPad.castShadow = true;
   gunGrp.add(stockPad);
@@ -4812,107 +5969,118 @@ function buildRattlesnakeBoss() {
   }
 
   const dorsal = new THREE.MeshStandardMaterial({
-    color: 0x5a4836,
-    roughness: 0.96,
+    color: 0x7b6648,
+    roughness: 0.985,
     metalness: 0,
-    emissive: 0x1a1610,
-    emissiveIntensity: 0.06,
+    emissive: 0x1b160f,
+    emissiveIntensity: 0.038,
   });
-  registerMat(dorsal, 0x1a1610, 0.06);
+  registerMat(dorsal, 0x1b160f, 0.038);
+  const saddle = new THREE.MeshStandardMaterial({
+    color: 0x554632,
+    roughness: 0.985,
+    metalness: 0,
+    emissive: 0x151109,
+    emissiveIntensity: 0.028,
+  });
+  registerMat(saddle, 0x151109, 0.028);
   const diamond = new THREE.MeshStandardMaterial({
-    color: 0x1a1410,
-    roughness: 0.97,
+    color: 0x201911,
+    roughness: 0.99,
     metalness: 0,
-    emissive: 0x060504,
-    emissiveIntensity: 0.04,
+    emissive: 0x070605,
+    emissiveIntensity: 0.02,
   });
-  registerMat(diamond, 0x060504, 0.04);
+  registerMat(diamond, 0x070605, 0.02);
   const belly = new THREE.MeshStandardMaterial({
-    color: 0xeee6d4,
-    roughness: 0.91,
+    color: 0xdccfb6,
+    roughness: 0.95,
     metalness: 0,
-    emissive: 0x242018,
-    emissiveIntensity: 0.03,
+    emissive: 0x20180e,
+    emissiveIntensity: 0.018,
   });
-  registerMat(belly, 0x242018, 0.03);
+  registerMat(belly, 0x20180e, 0.018);
   const tailBlack = new THREE.MeshStandardMaterial({
     color: 0x0a0a0a,
-    roughness: 0.94,
+    roughness: 0.96,
     metalness: 0,
     emissive: 0x000000,
     emissiveIntensity: 0,
   });
   registerMat(tailBlack, 0x000000, 0);
   const tailWhite = new THREE.MeshStandardMaterial({
-    color: 0xd8cec0,
-    roughness: 0.9,
+    color: 0xd6c8b8,
+    roughness: 0.95,
     metalness: 0,
-    emissive: 0x141210,
-    emissiveIntensity: 0.02,
+    emissive: 0x10100e,
+    emissiveIntensity: 0.01,
   });
-  registerMat(tailWhite, 0x141210, 0.02);
+  registerMat(tailWhite, 0x10100e, 0.01);
   const rattleMat = new THREE.MeshStandardMaterial({
-    color: 0xc8b490,
-    roughness: 0.88,
-    metalness: 0.06,
-    emissive: 0x322818,
+    color: 0xb39b78,
+    roughness: 0.92,
+    metalness: 0.02,
+    emissive: 0x241a0e,
+    emissiveIntensity: 0.035,
+  });
+  registerMat(rattleMat, 0x241a0e, 0.035);
+  const mouthInterior = new THREE.MeshStandardMaterial({
+    color: 0x1a0a0a,
+    roughness: 0.94,
+    metalness: 0,
+    emissive: 0x2a0e0e,
     emissiveIntensity: 0.08,
   });
-  registerMat(rattleMat, 0x322818, 0.08);
-  const mouthInterior = new THREE.MeshStandardMaterial({
-    color: 0x120606,
-    roughness: 0.92,
-    metalness: 0,
-    emissive: 0x280808,
-    emissiveIntensity: 0.14,
-  });
-  registerMat(mouthInterior, 0x280808, 0.14);
+  registerMat(mouthInterior, 0x2a0e0e, 0.08);
   const fangMat = new THREE.MeshStandardMaterial({
-    color: 0xeee8dc,
-    roughness: 0.32,
-    metalness: 0.12,
-    emissive: 0x2a2218,
-    emissiveIntensity: 0.07,
+    color: 0xe7dfcf,
+    roughness: 0.4,
+    metalness: 0.03,
+    emissive: 0x1c1612,
+    emissiveIntensity: 0.025,
   });
-  registerMat(fangMat, 0x2a2218, 0.07);
+  registerMat(fangMat, 0x1c1612, 0.025);
   const snakeEyeMat = new THREE.MeshStandardMaterial({
-    color: 0x050504,
-    roughness: 0.18,
-    metalness: 0.22,
-    emissive: 0x0a180a,
-    emissiveIntensity: 0.22,
+    color: 0x0a0b08,
+    roughness: 0.3,
+    metalness: 0.05,
+    emissive: 0x0c150a,
+    emissiveIntensity: 0.12,
   });
-  registerMat(snakeEyeMat, 0x0a180a, 0.22);
+  registerMat(snakeEyeMat, 0x0c150a, 0.12);
   const tongueMat = new THREE.MeshStandardMaterial({
-    color: 0xc03848,
-    roughness: 0.55,
+    color: 0x7d2d34,
+    roughness: 0.7,
     metalness: 0,
-    emissive: 0x401018,
-    emissiveIntensity: 0.1,
+    emissive: 0x2a0e12,
+    emissiveIntensity: 0.05,
   });
-  registerMat(tongueMat, 0x401018, 0.1);
+  registerMat(tongueMat, 0x2a0e12, 0.05);
 
-  /** Local +Z is chase direction; mirror Z and rotate 180° so head/snout lead, not the rattle. */
+  /** Local +Z is chase direction; keep head/snout on +Z and tail/rattle on -Z. */
   const body = new THREE.Group();
-  body.rotation.y = Math.PI;
   root.add(body);
 
-  const n = 20;
+  const n = 22;
   const snakeSegments = [];
   for (let i = 0; i < n; i++) {
     const u = i / (n - 1);
-    const t = u * Math.PI * 1.22;
-    const x = Math.sin(t * 1.38) * 0.54 * (0.32 + 0.68 * Math.sin(u * Math.PI));
-    const z = 2.38 - u * 4.92;
-    const r = 0.14 + Math.sin(u * Math.PI) * 0.125 * 1.08 + (1 - u) * 0.05;
-    const y = r * 0.4 + 0.025;
+    const t = u * Math.PI * 1.36;
+    const coil = Math.sin(u * Math.PI);
+    const x = Math.sin(t * 1.3) * 0.58 * (0.26 + 0.74 * coil);
+    const z = -2.55 + u * 5.18;
+    const r = 0.11 + Math.sin(u * Math.PI) * 0.16 + (1 - u) * 0.055;
+    let y = r * 0.4 + 0.025;
+    if (u > 0.72) y += THREE.MathUtils.smoothstep(u, 0.72, 1) * 0.18;
 
     let skin;
-    if (u >= 0.76) skin = belly;
-    else skin = Math.floor(u * 12) % 2 === 0 ? diamond : dorsal;
+    if (u >= 0.84) skin = belly;
+    else if (Math.abs(Math.sin(u * 15.5)) > 0.67) skin = diamond;
+    else if (Math.abs(Math.sin((u + 0.12) * 10.8)) > 0.78) skin = saddle;
+    else skin = dorsal;
 
-    const seg = new THREE.Mesh(new THREE.SphereGeometry(r, 14, 12), skin);
-    seg.scale.set(1.06, 0.66, 1.1);
+    const seg = new THREE.Mesh(new THREE.SphereGeometry(r, 10, 8), skin);
+    seg.scale.set(1.13, 0.56, 1.2);
     seg.position.set(x, y, z);
     if (i === n - 1) seg.userData.hitZone = "head";
     seg.castShadow = true;
@@ -4927,11 +6095,11 @@ function buildRattlesnakeBoss() {
 
   const head = snakeSegments[n - 1].mesh;
   const headR = head.geometry.parameters.radius;
-  /** Forward along neck sphere local −Z (strike direction after body flip). */
-  const hr = headR * 1.85;
+  const hr = headR * 2;
 
   const headAssy = new THREE.Group();
-  headAssy.position.set(0, headR * 0.04, -headR * 0.52);
+  headAssy.position.set(0, headR * 0.36, headR * 0.52);
+  headAssy.rotation.x = -0.4;
   head.add(headAssy);
 
   function markHead(m) {
@@ -4940,40 +6108,49 @@ function buildRattlesnakeBoss() {
     headAssy.add(m);
   }
 
-  const cranium = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.52, 14, 12), diamond);
-  cranium.scale.set(1.62, 0.78, 1.12);
-  cranium.position.set(0, hr * 0.14, -hr * 0.38);
+  const cranium = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.54, 10, 8), dorsal);
+  cranium.scale.set(1.88, 0.92, 1.3);
+  cranium.position.set(0, hr * 0.22, hr * 0.32);
   markHead(cranium);
 
-  const crown = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.44, 10, 8), dorsal);
-  crown.scale.set(1.35, 0.55, 0.95);
-  crown.position.set(0, hr * 0.32, -hr * 0.28);
+  const crown = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.4, 8, 6), saddle);
+  crown.scale.set(1.42, 0.58, 1.04);
+  crown.position.set(0, hr * 0.46, hr * 0.24);
   markHead(crown);
 
   const snoutTop = new THREE.Mesh(
-    new THREE.CylinderGeometry(hr * 0.22, hr * 0.42, hr * 0.88, 10),
+    new THREE.CylinderGeometry(hr * 0.18, hr * 0.38, hr * 0.98, 10),
     dorsal
   );
   snoutTop.rotation.x = Math.PI / 2;
-  snoutTop.position.set(0, hr * 0.02, -hr * 1.02);
+  snoutTop.position.set(0, hr * 0.01, hr * 0.98);
   markHead(snoutTop);
 
-  const snoutTip = new THREE.Mesh(new THREE.ConeGeometry(hr * 0.26, hr * 0.36, 8), dorsal);
-  snoutTip.rotation.x = -Math.PI / 2;
-  snoutTip.position.set(0, -hr * 0.02, -hr * 1.52);
+  const snoutTip = new THREE.Mesh(new THREE.ConeGeometry(hr * 0.23, hr * 0.33, 8), dorsal);
+  snoutTip.rotation.x = Math.PI / 2;
+  snoutTip.position.set(0, -hr * 0.03, hr * 1.47);
   markHead(snoutTip);
 
+  const browL = new THREE.Mesh(new THREE.BoxGeometry(hr * 0.28, hr * 0.08, hr * 0.34), saddle);
+  browL.position.set(-hr * 0.32, hr * 0.35, hr * 0.66);
+  browL.rotation.set(0, -0.2, 0.2);
+  markHead(browL);
+  const browR = new THREE.Mesh(new THREE.BoxGeometry(hr * 0.28, hr * 0.08, hr * 0.34), saddle);
+  browR.position.set(hr * 0.32, hr * 0.35, hr * 0.66);
+  browR.rotation.set(0, 0.2, -0.2);
+  markHead(browR);
+
   const jawPivot = new THREE.Group();
-  jawPivot.position.set(0, -hr * 0.12, -hr * 0.22);
-  jawPivot.rotation.x = 0.36;
+  jawPivot.position.set(0, -hr * 0.1, hr * 0.2);
+  jawPivot.rotation.x = 0.42;
   headAssy.add(jawPivot);
 
   const lowerJaw = new THREE.Mesh(
-    new THREE.BoxGeometry(hr * 0.95, hr * 0.2, hr * 0.72),
+    new THREE.BoxGeometry(hr * 1.02, hr * 0.16, hr * 0.78),
     belly
   );
-  lowerJaw.position.set(0, -hr * 0.12, -hr * 0.58);
-  lowerJaw.rotation.x = -0.06;
+  lowerJaw.position.set(0, -hr * 0.14, hr * 0.62);
+  lowerJaw.rotation.x = -0.08;
   lowerJaw.userData.hitZone = "head";
   lowerJaw.castShadow = true;
   jawPivot.add(lowerJaw);
@@ -4982,98 +6159,116 @@ function buildRattlesnakeBoss() {
     new THREE.BoxGeometry(hr * 0.38, hr * 0.12, hr * 0.36),
     mouthInterior
   );
-  mouthRoof.position.set(0, -hr * 0.08, -hr * 0.72);
+  mouthRoof.position.set(0, -hr * 0.08, hr * 0.74);
   markHead(mouthRoof);
 
   const mouthFloor = new THREE.Mesh(
     new THREE.BoxGeometry(hr * 0.36, hr * 0.1, hr * 0.32),
     mouthInterior
   );
-  mouthFloor.position.set(0, -hr * 0.28, -hr * 0.7);
+  mouthFloor.position.set(0, -hr * 0.29, hr * 0.74);
   markHead(mouthFloor);
 
   const mouthBack = new THREE.Mesh(
     new THREE.BoxGeometry(hr * 0.32, hr * 0.26, hr * 0.08),
     mouthInterior
   );
-  mouthBack.position.set(0, -hr * 0.17, -hr * 0.52);
+  mouthBack.position.set(0, -hr * 0.17, hr * 0.54);
   markHead(mouthBack);
 
   function addFang(px) {
-    const fang = new THREE.Mesh(new THREE.ConeGeometry(hr * 0.045, hr * 0.36, 6), fangMat);
+    const fang = new THREE.Mesh(new THREE.ConeGeometry(hr * 0.034, hr * 0.42, 6), fangMat);
     fang.rotation.order = "YXZ";
-    fang.rotation.x = Math.PI * 0.52;
+    fang.rotation.x = Math.PI * 0.5;
     fang.rotation.z = px > 0 ? -0.14 : 0.14;
-    fang.position.set(px, -hr * 0.06, -hr * 1.38);
+    fang.position.set(px, -hr * 0.03, hr * 1.3);
     markHead(fang);
   }
-  addFang(hr * 0.14);
-  addFang(-hr * 0.14);
+  addFang(hr * 0.105);
+  addFang(-hr * 0.105);
 
   function addEye(px) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.065, 10, 8), snakeEyeMat);
-    eye.scale.set(1, 1.35, 0.72);
-    eye.position.set(px, hr * 0.22, -hr * 0.62);
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.072, 8, 6), snakeEyeMat);
+    eye.scale.set(1.08, 1.48, 0.68);
+    eye.position.set(px, hr * 0.3, hr * 0.68);
     markHead(eye);
     const slit = new THREE.Mesh(
-      new THREE.BoxGeometry(hr * 0.018, hr * 0.07, hr * 0.04),
+      new THREE.BoxGeometry(hr * 0.022, hr * 0.1, hr * 0.045),
       snakeEyeMat
     );
-    slit.position.set(px * 1.02, hr * 0.22, -hr * 0.64);
+    slit.position.set(px * 1.02, hr * 0.3, hr * 0.69);
     markHead(slit);
   }
   addEye(hr * 0.38);
   addEye(-hr * 0.38);
 
+  const pitL = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.036, 8, 6), mouthInterior);
+  pitL.position.set(-hr * 0.32, -hr * 0.02, hr * 0.94);
+  markHead(pitL);
+  const pitR = new THREE.Mesh(new THREE.SphereGeometry(hr * 0.036, 8, 6), mouthInterior);
+  pitR.position.set(hr * 0.32, -hr * 0.02, hr * 0.94);
+  markHead(pitR);
+
+  const tongueGroup = new THREE.Group();
+  tongueGroup.position.set(0, -hr * 0.19, hr * 1.08);
+  headAssy.add(tongueGroup);
   const tongueStem = new THREE.Mesh(
-    new THREE.BoxGeometry(hr * 0.08, hr * 0.04, hr * 0.22),
+    new THREE.CylinderGeometry(hr * 0.018, hr * 0.026, hr * 0.36, 8),
     tongueMat
   );
-  tongueStem.position.set(0, -hr * 0.2, -hr * 1.12);
-  markHead(tongueStem);
-  const forkL = new THREE.Mesh(
-    new THREE.BoxGeometry(hr * 0.035, hr * 0.028, hr * 0.14),
-    tongueMat
-  );
-  forkL.position.set(-hr * 0.04, -hr * 0.2, -hr * 1.28);
-  forkL.rotation.y = 0.28;
-  markHead(forkL);
-  const forkR = new THREE.Mesh(
-    new THREE.BoxGeometry(hr * 0.035, hr * 0.028, hr * 0.14),
-    tongueMat
-  );
-  forkR.position.set(hr * 0.04, -hr * 0.2, -hr * 1.28);
-  forkR.rotation.y = -0.28;
-  markHead(forkR);
+  tongueStem.rotation.x = Math.PI / 2;
+  tongueStem.scale.set(1, 1, 1);
+  tongueStem.position.set(0, 0, hr * 0.14);
+  tongueStem.castShadow = true;
+  tongueGroup.add(tongueStem);
+  function forkTine(side) {
+    const t = new THREE.Mesh(new THREE.ConeGeometry(hr * 0.014, hr * 0.16, 6), tongueMat);
+    t.rotation.order = "YXZ";
+    t.rotation.x = Math.PI / 2 + 0.12;
+    t.rotation.y = side * 0.42;
+    t.rotation.z = side * 0.18;
+    t.position.set(side * hr * 0.024, 0, hr * 0.32);
+    t.castShadow = true;
+    tongueGroup.add(t);
+  }
+  forkTine(1);
+  forkTine(-1);
 
   const tail = snakeSegments[0].mesh;
   const tx = tail.position.x;
   const ty = tail.position.y;
   const tz = tail.position.z;
-  let bz = tz + 0.12;
-  for (let b = 0; b < 5; b++) {
+  let bz = tz - 0.06;
+  for (let b = 0; b < 7; b++) {
     const bandMat = b % 2 === 0 ? tailBlack : tailWhite;
     const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(0.092 - b * 0.005, 0.026, 6, 14),
+      new THREE.TorusGeometry(0.085 - b * 0.004, 0.023, 6, 14),
       bandMat
     );
     ring.rotation.x = Math.PI / 2;
-    ring.position.set(tx * 0.88, ty + 0.018, bz);
+    ring.position.set(tx * 0.9, ty + 0.016, bz);
     ring.castShadow = true;
     body.add(ring);
-    bz += 0.052;
+    bz -= 0.048;
   }
   for (let ri = 0; ri < 7; ri++) {
     const bell = new THREE.Mesh(
-      new THREE.SphereGeometry(0.048 + ri * 0.01, 8, 8),
+      new THREE.SphereGeometry(0.034 + ri * 0.008, 8, 8),
       rattleMat
     );
-    bell.position.set(tx * 0.82, ty + 0.032, bz + ri * 0.084);
+    bell.position.set(tx * 0.86, ty + 0.024, bz - ri * 0.075);
     bell.castShadow = true;
     body.add(bell);
   }
 
-  return { root, mats, matBases, snakeSegments, headJawPivot: jawPivot };
+  return {
+    root,
+    mats,
+    matBases,
+    snakeSegments,
+    headJawPivot: jawPivot,
+    snakeTongueGroup: tongueGroup,
+  };
 }
 
 /** Lean wolf: tapered torso, neck, cranium + snout, cone ears, bushy tail. */
@@ -5293,16 +6488,17 @@ const sparks = [];
 
 function randomSpawnPoint() {
   const edge = Math.floor(Math.random() * 4);
-  const t = (Math.random() - 0.5) * (ARENA - 4) * 2;
+  const ext = activeMapId === "adventure" ? ADVENTURE_ARENA : ARENA;
+  const t = (Math.random() - 0.5) * (ext - 4) * 2;
   switch (edge) {
     case 0:
-      return new THREE.Vector3(t, 0, -ARENA + 2.5);
+      return new THREE.Vector3(t, 0, -ext + 2.5);
     case 1:
-      return new THREE.Vector3(t, 0, ARENA - 2.5);
+      return new THREE.Vector3(t, 0, ext - 2.5);
     case 2:
-      return new THREE.Vector3(-ARENA + 2.5, 0, t);
+      return new THREE.Vector3(-ext + 2.5, 0, t);
     default:
-      return new THREE.Vector3(ARENA - 2.5, 0, t);
+      return new THREE.Vector3(ext - 2.5, 0, t);
   }
 }
 
@@ -5486,6 +6682,11 @@ function hitPracticeTarget(t, pt, opts) {
 
 function syncMenuObjectiveForPractice() {
   if (!menuObjectiveEl) return;
+  if (mapSelectEl?.value === "adventure") {
+    menuObjectiveEl.textContent =
+      "Adventure: barriers show kill progress (25 / 25 / 25 / 40). Clear each ward, climb the mesa, survive summit hazards, then fight the boss on the flat summit.";
+    return;
+  }
   if (practiceMode2El?.checked) {
     menuObjectiveEl.textContent =
       "Practice 2: obby to the glowing green finish (+420 score each clear). Fall in the void and you restart at the start. No weapons. Random color flashes every 1–15 s + sound; when you see CLICK RIGHT NOW, left-click within one second for +55.";
@@ -5633,7 +6834,7 @@ function spawnMapBossEnemy() {
   if (enemies.length >= MAX_LIVING_ENEMIES) return;
   const forest = activeMapId === "forest";
   const built = forest ? buildRattlesnakeBoss() : buildKnightBoss();
-  const { root, mats, matBases, snakeSegments, headJawPivot } = built;
+  const { root, mats, matBases, snakeSegments, headJawPivot, snakeTongueGroup } = built;
   if (forest) root.scale.setScalar(1.72);
   const pos = randomSpawnPoint();
   root.position.copy(pos);
@@ -5655,6 +6856,7 @@ function spawnMapBossEnemy() {
         isRattlesnakeBoss: true,
         snakeSegments: snakeSegments ?? null,
         headJawPivot: headJawPivot ?? null,
+        snakeTongueGroup: snakeTongueGroup ?? null,
         snakeAttackBlend: 0,
         mats,
         matBases,
@@ -6683,7 +7885,7 @@ function explodeGrenadeAt(pos, dmg, radius) {
       clearEnemyDamagePopup(e);
       scene.remove(e.root);
       dead.push(e);
-      awardEnemyKillScore();
+      awardEnemyKillScore(e);
     }
   }
   for (const e of dead) {
@@ -6825,7 +8027,7 @@ function tryMeleeAttack() {
       burstDeathAt(rec.point);
       scene.remove(e.root);
       dead.push(e);
-      awardEnemyKillScore();
+      awardEnemyKillScore(e);
     }
   }
   for (const e of dead) {
@@ -6950,7 +8152,7 @@ function shootShotgunPellets(start) {
       burstDeathAt(row.pt);
       scene.remove(e.root);
       dead.push(e);
-      awardEnemyKillScore();
+      awardEnemyKillScore(e);
     }
   }
   for (const e of dead) {
@@ -7117,7 +8319,7 @@ function shoot() {
         burstDeathAt(h.point);
         scene.remove(e.root);
         dead.push(e);
-        awardEnemyKillScore();
+        awardEnemyKillScore(e);
       }
     }
     for (const e of dead) {
@@ -7179,48 +8381,88 @@ function shoot() {
     scene.remove(hitEnemy.root);
     const idx = enemies.indexOf(hitEnemy);
     if (idx !== -1) enemies.splice(idx, 1);
-    awardEnemyKillScore();
+    awardEnemyKillScore(hitEnemy);
   }
 }
 
 function clampPlayer() {
   if (activeMapId === "practice2_obby" || practiceMode2) return;
   const p = yaw.position;
-  const max = ARENA - PLAYER_RADIUS - 0.5;
+  const ext = activeMapId === "adventure" ? ADVENTURE_ARENA : ARENA;
+  const max = ext - PLAYER_RADIUS - 0.5;
   p.x = THREE.MathUtils.clamp(p.x, -max, max);
   p.z = THREE.MathUtils.clamp(p.z, -max, max);
 }
 
+/** Rattlesnake bite only when player is near the snout and inside the forward arc (not body-wrap range). */
+function playerInRattlesnakeHeadStrikeZone(e) {
+  const segs = e.snakeSegments;
+  if (!segs?.length) return false;
+  const baseDx = yaw.position.x - e.root.position.x;
+  const baseDz = yaw.position.z - e.root.position.z;
+  const coarseReach = (e.meleeReach ?? 2.62) * 2.2;
+  if (Math.hypot(baseDx, baseDz) > coarseReach) return false;
+  const headMesh = segs[segs.length - 1].mesh;
+  headMesh.getWorldPosition(tmpSnakeHeadWorld);
+  const snakeYaw = e.root.rotation.y;
+  const fx = Math.sin(snakeYaw);
+  const fz = Math.cos(snakeYaw);
+  const scl = e.root.scale?.x ?? 1;
+  const snoutFwd = 0.58 * scl;
+  tmpSnakeHeadWorld.x += fx * snoutFwd;
+  tmpSnakeHeadWorld.z += fz * snoutFwd;
+  const px = yaw.position.x;
+  const pz = yaw.position.z;
+  const dx = px - tmpSnakeHeadWorld.x;
+  const dz = pz - tmpSnakeHeadWorld.z;
+  const dist = Math.hypot(dx, dz);
+  const reach = (e.meleeReach ?? 2.62) * 0.88;
+  if (dist > reach) return false;
+  if (dist < 1e-4) return true;
+  const inv = 1 / dist;
+  const dot = dx * inv * fx + dz * inv * fz;
+  if (dot < 0.45) return false;
+  const rx = -fz;
+  const rz = fx;
+  const lateral = Math.abs(dx * rx + dz * rz);
+  return lateral < 1.05 * scl;
+}
+
 function tryDamagePlayer() {
-  const pxz = new THREE.Vector2(yaw.position.x, yaw.position.z);
   for (const e of enemies) {
-    const exz = new THREE.Vector2(e.root.position.x, e.root.position.z);
+    if (e.isAdventureFinalBoss) continue;
     const reach = e.meleeReach ?? 1.05;
-    if (pxz.distanceTo(exz) < reach) {
-      if (damageCooldown <= 0) {
-        void resumeAudio();
-        playEnemyAttack();
-        playHurt();
-        addCameraShake(0.14, 0.026, 0.36);
-        health -= e.damage ?? ENEMY_DAMAGE;
-        damageCooldown = DAMAGE_COOLDOWN;
-        const dmg = e.damage ?? ENEMY_DAMAGE;
-        if (e.isRattlesnakeBoss) {
-          playerPoisonRemain = Math.max(playerPoisonRemain, 5);
-          poisonFlash = Math.min(POISON_FLASH_MAX, poisonFlash + 0.78);
-        } else {
-          const bump = THREE.MathUtils.clamp(
-            0.28 + (dmg / PLAYER_MAX_HEALTH) * 2.05,
-            0.34,
-            0.82
-          );
-          hurtFlash = Math.min(HURT_VIGNETTE_FLASH_MAX, hurtFlash + bump);
-        }
-        updateHealthHud();
-        if (health <= 0) endGame();
-      }
-      return;
+    let inStrike;
+    if (e.isRattlesnakeBoss) inStrike = playerInRattlesnakeHeadStrikeZone(e);
+    else {
+      const dx = yaw.position.x - e.root.position.x;
+      const dz = yaw.position.z - e.root.position.z;
+      inStrike = Math.hypot(dx, dz) < reach;
     }
+    if (!inStrike) continue;
+    if (damageCooldown <= 0) {
+      void resumeAudio();
+      playEnemyAttack();
+      playHurt();
+      addCameraShake(0.14, 0.026, 0.36);
+      health -= e.damage ?? ENEMY_DAMAGE;
+      damageCooldown = DAMAGE_COOLDOWN;
+      const dmg = e.damage ?? ENEMY_DAMAGE;
+      if (e.isRattlesnakeBoss) {
+        playerPoisonRemain = Math.max(playerPoisonRemain, 5);
+        poisonFlash = Math.min(POISON_FLASH_MAX, poisonFlash + 0.78);
+      } else {
+        const bump = THREE.MathUtils.clamp(
+          0.28 + (dmg / PLAYER_MAX_HEALTH) * 2.05,
+          0.34,
+          0.82
+        );
+        hurtFlash = Math.min(HURT_VIGNETTE_FLASH_MAX, hurtFlash + bump);
+      }
+      updateHealthHud();
+      if (health <= 0) endGame();
+    }
+    return;
   }
 }
 
@@ -7390,6 +8632,37 @@ menuBtn?.addEventListener("click", (e) => {
 });
 
 function endGame() {
+  if (
+    adventureMode &&
+    adventureCheckpointValid &&
+    adventureLives > 0 &&
+    !practiceMode &&
+    !mpDmActive()
+  ) {
+    adventureLives -= 1;
+    health = Math.round(PLAYER_MAX_HEALTH * 0.42);
+    hurtFlash = 0;
+    playerPoisonRemain = 0;
+    yaw.position.copy(adventureCheckpointPos);
+    playerVelY = 0;
+    resolvePlayerColliders();
+    clampPlayer();
+    damageCooldown = 0;
+    updateHealthHud();
+    healFlash = Math.min(0.55, healFlash + 0.35);
+    void resumeAudio();
+    playAdventureCheckpointPing();
+    showAdventureToast(
+      `Checkpoint respawn — ${adventureLives} ${adventureLives === 1 ? "life" : "lives"} left.`,
+      3000
+    );
+    playing = true;
+    return;
+  }
+  if (adventureMode) {
+    stopAdventureAmbience();
+    hideAllAdventureRings();
+  }
   playing = false;
   playerPoisonRemain = 0;
   fireHeld = false;
@@ -7464,6 +8737,11 @@ function resetGame() {
     weaponBarEl?.classList.remove("weapon-bar--dm");
     rebuildLevelForCurrentPracticeState();
   }
+  adventureMode = !useDm && !practiceMode && mapSelectEl?.value === "adventure";
+  if (!adventureMode) stopAdventureAmbience();
+  adventureStage = "off";
+  adventureSpawnTimer = adventureMode ? 0.2 : 0;
+  adventureBossSpawned = false;
   bossSpawnTimer = 20 + Math.random() * 40;
   timerMinibossSpawned = false;
   gameLevel = 1;
@@ -7471,6 +8749,7 @@ function resetGame() {
   lastLevelBossMilestone = 0;
   playerPoisonRemain = 0;
   updateLevelHud();
+  if (adventureMode) beginAdventureRun();
   if (practiceMode) loadoutChoice[SLOT_PRIMARY] = PRIMARY_INDEX_ASSAULT;
   refreshWeaponBarFromLoadout();
   activeWeapon = SLOT_PRIMARY;
@@ -7524,7 +8803,12 @@ function resetGame() {
   yaw.rotation.set(0, 0, 0);
   pitch.rotation.set(0, 0, 0);
   if (practiceMode2) resetPractice2SpawnToStart();
-  else {
+  else if (adventureMode) {
+    yaw.position.set(0, 0, ADVENTURE_PLAYER_START_Z);
+    resolvePlayerColliders();
+    clampPlayer();
+    syncAdventureCheckpointToStart();
+  } else {
     resolvePlayerColliders();
     clampPlayer();
   }
@@ -7817,6 +9101,17 @@ document.addEventListener("keydown", (e) => {
   ) {
     e.preventDefault();
     switchWeapon(SLOT_UTILITY);
+  }
+  if (
+    e.code === "Digit0" &&
+    !e.repeat &&
+    playing &&
+    health > 0 &&
+    gameoverEl?.classList.contains("hidden") &&
+    !mpDmActive()
+  ) {
+    e.preventDefault();
+    addGameLevels(10);
   }
   if (
     e.code === "KeyQ" &&
@@ -8216,7 +9511,9 @@ function tick() {
         yaw.position.z,
         yaw.position.y
       );
-      if (onF && !practice2ObbyWasOnFinish) triggerPractice2ObbyFinish();
+      if (onF && !practice2ObbyWasOnFinish) {
+        triggerPractice2ObbyFinish();
+      }
       practice2ObbyWasOnFinish = onF;
     }
     if (pSnap.vy === 0 && vyBeforeSupport < -1.15) {
@@ -8311,7 +9608,9 @@ function tick() {
       mobileFireHeld;
     if (wantsFire) tryFire();
 
-    if (practiceMovingTargets) {
+    if (adventureMode) {
+      updateAdventureMode(dt);
+    } else if (practiceMovingTargets) {
       updatePracticeTargets(dt);
     } else {
       spawnTimer -= dt;
@@ -8323,7 +9622,7 @@ function tick() {
     updateGrenades(dt);
     updateAmmoPickups(dt);
 
-    if (!practiceMode && !mpDmActive() && playing && health > 0) {
+    if (!adventureMode && !practiceMode && !mpDmActive() && playing && health > 0) {
       bossSpawnTimer -= dt;
       if (!timerMinibossSpawned && bossSpawnTimer <= 0) spawnGiantBossEnemy();
     }
@@ -8446,7 +9745,9 @@ function tick() {
       for (let si = 0; si < sub; si++) {
         e.root.position.x += vx * h;
         e.root.position.z += vz * h;
-        const er = resolveEntityXZ(e.root.position.x, e.root.position.z, rad, e.baseY);
+        const er = resolveEntityXZ(e.root.position.x, e.root.position.z, rad, e.baseY, {
+          extraPasses: 8,
+        });
         e.root.position.x = er.x;
         e.root.position.z = er.z;
       }
@@ -8467,14 +9768,21 @@ function tick() {
         const nseg = e.snakeSegments.length;
         for (let si = 0; si < nseg; si++) {
           const s = e.snakeSegments[si];
+          const uSeg = si / Math.max(1, nseg - 1);
           const ph = si * 0.48 + now * (0.0075 + blend * 0.018);
           const side = Math.sin(ph) * 0.09 * (1 - blend);
           const lift =
-            Math.sin((si / Math.max(1, nseg - 1)) * Math.PI) * blend * 0.42 +
+            Math.sin(uSeg * Math.PI) * blend * 0.42 +
             (1 - blend) * Math.sin(ph * 1.22) * 0.02;
+          const neckRaise = THREE.MathUtils.smoothstep(uSeg, 0.68, 1) * 0.28;
           s.mesh.position.x = s.baseX + side;
-          s.mesh.position.y = s.baseY + lift;
+          s.mesh.position.y = s.baseY + lift + neckRaise;
           s.mesh.position.z = s.baseZ;
+        }
+        if (e.snakeTongueGroup) {
+          const flick = Math.sin(now * 0.015 + e.phase * 2.0);
+          e.snakeTongueGroup.rotation.y = flick * 0.26;
+          e.snakeTongueGroup.rotation.x = flick * 0.08 - 0.04;
         }
       }
 
